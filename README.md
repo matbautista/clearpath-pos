@@ -145,3 +145,55 @@ same inventory and sales data in real time. This still requires no internet
 connection — only a local network (WiFi router or switch). If you don't want other
 devices to reach it, run the server on a machine that's not on a shared network, or
 add firewall rules to block the port from other devices.
+
+## Deploying on Windows
+
+A common setup: the server runs on a Windows desktop, and staff use it from a tablet
+over the same WiFi/LAN (see [Running on multiple registers / devices](#running-on-multiple-registers--devices)
+above for the browser side). The app itself needs nothing Windows-specific — `npm
+install && npm start` works the same as on Mac/Linux — but a few things are worth
+setting up deliberately so the server is actually there when the restaurant needs it:
+
+- **Install Node.js.** Get the LTS installer from [nodejs.org](https://nodejs.org)
+  (18 or newer). Then run `npm install` once from the project folder in a Command
+  Prompt or PowerShell window — this also compiles/fetches the one native dependency
+  (`better-sqlite3`). It ships prebuilt binaries for Windows, so this normally just
+  works, but it's worth doing this step once on the actual machine you'll deploy to
+  rather than assuming it behaves the same as on Mac.
+- **Allow it through Windows Firewall.** The first time you run `npm start`, Windows
+  will prompt to allow Node.js network access — allow it for **Private networks**
+  (not Public). If you don't get prompted (or blocked it by mistake), add it manually
+  under *Windows Defender Firewall → Allow an app through firewall*.
+- **Keep the machine awake.** If Windows sleeps, or locks in a way that suspends
+  background processes, the server goes down mid-shift and every tablet loses
+  connection. Under *Settings → System → Power*, set sleep to **Never** while
+  plugged in. It's fine for the display to turn off — only the sleep/suspend state
+  matters.
+- **Start the server automatically.** Right now, someone has to open a terminal and
+  run `npm start` after every reboot. Two options, depending on how hands-off you
+  want it:
+  - **Simple**: put a shortcut to a `.bat` file (containing `cd /d C:\path\to\app`
+    then `npm start`) in the Startup folder
+    (`shell:startup` in the Run dialog) — it launches automatically whenever that
+    user logs in.
+  - **More robust**: run it as a background service with [PM2](https://pm2.keymetrics.io/),
+    which restarts the app automatically if it ever crashes and can start before
+    anyone logs in:
+    ```
+    npm install -g pm2 pm2-windows-startup
+    pm2-startup install
+    pm2 start server/index.js --name clearpath-pos
+    pm2 save
+    ```
+- **Give the desktop a stable local IP.** By default a router can hand out a
+  different IP after a reboot, which breaks whatever URL the tablet has bookmarked.
+  Set a DHCP reservation for the desktop's MAC address in your router's admin page
+  (or assign it a static IP), so `http://<ip>:4000` always points to the same place.
+- **Back up `data/pos.db` on a schedule.** See [Data & backups](#data--backups) above
+  for what's in it. On Windows, Task Scheduler can run a daily copy command (e.g.
+  `robocopy` to an external drive or network share) without anyone remembering to do
+  it by hand.
+- **On the tablet**, just open a browser to `http://<desktop-ip>:4000` — no app
+  install needed. Chrome and Edge both support "Add to Home screen," which gives it
+  an app-like icon and launches full-screen without browser chrome, closer to a
+  dedicated POS terminal.
