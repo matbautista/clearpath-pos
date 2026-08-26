@@ -1,0 +1,40 @@
+CLEAR PATH POS - WINDOWS SETUP
+================================
+
+You should have this whole "Clear Path POS" folder somewhere on the
+computer (for example, on the Desktop). Once it's there:
+
+1. Open this "windows" folder.
+2. Right-click "Install-ClearPathPOS.bat" and choose "Run as administrator".
+   (Just double-clicking also works - it will ask Windows for permission
+   itself.)
+3. Windows will ask "Do you want to allow this app to make changes to your
+   device?" - click Yes.
+4. A black window will open and do the setup automatically. This can take
+   a few minutes (it's downloading and installing things). Don't close it.
+5. When it's done, a message box will pop up with the web address to use
+   on the tablet. Leave that window open until you see the popup.
+6. A "Clear Path POS" icon will also appear on the desktop - double-click
+   it any time to open the till on this computer.
+
+That's it. The app will now also start automatically every time this
+computer is turned on - nobody needs to open anything after a restart.
+
+ON THE TABLET
+-------------
+Open Chrome or Edge and go to the address from the popup (something like
+http://192.168.1.23:4000). In the browser menu, choose "Add to Home
+screen" so it opens full-screen like an app from then on.
+
+IF THE TABLET STOPS CONNECTING LATER
+-------------------------------------
+This usually means the computer's network address changed (e.g. after a
+power outage or router restart). Double-click "Show-Tablet-Address.bat"
+in this folder - it will show a popup with the current address to use.
+
+IF SOMETHING GOES WRONG
+------------------------
+The setup window will show a message in red and a popup explaining what
+happened. It's safe to just run "Install-ClearPathPOS.bat" again - it
+won't break anything by running twice. If it keeps failing, note down
+the red message and send it to whoever set this up for you.

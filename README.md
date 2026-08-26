@@ -150,9 +150,28 @@ add firewall rules to block the port from other devices.
 
 A common setup: the server runs on a Windows desktop, and staff use it from a tablet
 over the same WiFi/LAN (see [Running on multiple registers / devices](#running-on-multiple-registers--devices)
-above for the browser side). The app itself needs nothing Windows-specific — `npm
-install && npm start` works the same as on Mac/Linux — but a few things are worth
-setting up deliberately so the server is actually there when the restaurant needs it:
+above for the browser side).
+
+### Automated setup (recommended for a non-technical person doing the install)
+
+Copy this whole project folder onto the Windows desktop, then open
+`scripts/windows/` and follow `READ ME FIRST.txt` — it comes down to
+right-clicking `Install-ClearPathPOS.bat` and choosing "Run as administrator".
+No commands need to be typed. The script installs Node.js if missing, runs
+`npm install`, generates a `.env` with a random session secret, opens the
+firewall for the app's port, disables sleep on AC power, installs the app as
+a PM2 service that auto-starts on boot, adds a desktop shortcut, and finishes
+with a popup showing the address to use on the tablet. It's safe to re-run if
+anything fails partway (e.g. no internet mid-download). `Show-Tablet-Address.bat`
+in the same folder can be re-run any time later to look up that address again.
+
+### Manual setup
+
+The app itself needs nothing Windows-specific — `npm install && npm start` works
+the same as on Mac/Linux — but a few things are worth setting up deliberately so
+the server is actually there when the restaurant needs it (this is exactly what
+the automated script above does; only follow these steps by hand if you'd rather
+not run it, or want to understand/customize what it's doing):
 
 - **Install Node.js.** Get the LTS installer from [nodejs.org](https://nodejs.org)
   (18 or newer). Then run `npm install` once from the project folder in a Command
