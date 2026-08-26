@@ -67,8 +67,8 @@ admin/cashier login and a handful of sample products) and opens your browser to
 address yourself.
 
 Default logins:
-- **Admin**, PIN `1234`
-- **Cashier**, PIN `0000`
+- **Admin**, PIN `826497`
+- **Cashier**, PIN `123456`
 
 Change these PINs (or add real staff) from **Staff** once logged in as Admin.
 

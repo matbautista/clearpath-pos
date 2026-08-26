@@ -38,7 +38,7 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
   const url = `http://localhost:${PORT}`;
   console.log(`\nClear Path POS is running at ${url}`);
-  console.log('Default logins -> Admin PIN: 1234  |  Cashier PIN: 0000\n');
+  console.log('Default logins -> Admin PIN: 826497  |  Cashier PIN: 123456\n');
   if (process.env.NO_OPEN !== 'true') {
     try {
       require('open')(url);

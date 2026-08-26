@@ -319,8 +319,8 @@ function seed() {
     const insertUser = db.prepare(
       'INSERT INTO users (name, pin_hash, role, is_default) VALUES (?, ?, ?, 1)'
     );
-    insertUser.run('Admin', bcrypt.hashSync('1234', 10), 'admin');
-    insertUser.run('Cashier', bcrypt.hashSync('0000', 10), 'cashier');
+    insertUser.run('Admin', bcrypt.hashSync('826497', 10), 'admin');
+    insertUser.run('Cashier', bcrypt.hashSync('123456', 10), 'cashier');
   }
 
   const tableCount = db.prepare('SELECT COUNT(*) c FROM tables').get().c;
