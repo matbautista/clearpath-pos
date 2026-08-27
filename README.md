@@ -46,9 +46,10 @@ for day-to-day use — and you use it by opening a page in your browser.
   at checkout for loyalty points.
 - **Staff accounts**: PIN login, three roles — cashier (Register, Tables, and their
   own Cash Drawer), manager (+ inventory, customers, reports, refunds, settings),
-  admin (+ staff accounts). The first Admin and Cashier accounts are protected
-  default accounts and can't be deactivated (though their PINs and names can still
-  be changed) — add more staff accounts for real day-to-day logins.
+  admin (+ staff accounts). The default Admin, Manager, and Cashier accounts are
+  protected — they can't be deactivated or have their role changed (though their
+  PINs and names can still be changed) — add more staff accounts for real
+  day-to-day logins.
 
 ## Requirements
 
@@ -61,16 +62,20 @@ npm install
 npm start
 ```
 
-The first run creates a local SQLite database in `data/pos.db` (seeded with a demo
-admin/cashier login and a handful of sample products) and opens your browser to
-`http://localhost:4000`. If your browser doesn't open automatically, open that
+The first run creates a local SQLite database in `data/pos.db` (seeded with demo
+admin/manager/cashier logins and a handful of sample products) and opens your browser
+to `http://localhost:4000`. If your browser doesn't open automatically, open that
 address yourself.
 
 Default logins:
 - **Admin**, PIN `826497`
+- **Manager**, PIN `651248`
 - **Cashier**, PIN `123456`
 
-Change these PINs (or add real staff) from **Staff** once logged in as Admin.
+These three default accounts' roles are locked (an Admin account can't be turned into
+a Cashier, etc.), so there's always at least one login for each role — but you can
+still change their PINs and names, or add real staff, from **Staff** once logged in
+as Admin.
 
 To stop the server, go back to the terminal window and press `Ctrl+C`.
 

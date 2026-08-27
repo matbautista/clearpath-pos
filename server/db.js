@@ -81,6 +81,19 @@ CREATE TABLE IF NOT EXISTS channels (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Per-channel price override and/or availability — e.g. FoodPanda/GrabFood
+-- menu prices are marked up from the walk-in price to absorb the platform's
+-- commission, and some menu items aren't offered on a given platform at all.
+-- A product with no row here just uses products.price and is available.
+CREATE TABLE IF NOT EXISTS product_channel_prices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  price REAL,
+  available INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(product_id, channel_id)
+);
+
 CREATE TABLE IF NOT EXISTS sales (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sale_number TEXT NOT NULL UNIQUE,
@@ -271,6 +284,7 @@ CREATE INDEX IF NOT EXISTS idx_sales_billed ON sales(billed_at);
 CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id);
 CREATE INDEX IF NOT EXISTS idx_sales_table ON sales(table_id);
+CREATE INDEX IF NOT EXISTS idx_product_channel_prices_product ON product_channel_prices(product_id);
 `);
 
 function migrate() {
@@ -310,6 +324,28 @@ function migrate() {
   if (!itemCols.includes('sent_to_kitchen')) db.exec('ALTER TABLE sale_items ADD COLUMN sent_to_kitchen INTEGER NOT NULL DEFAULT 0');
 
   db.exec('CREATE INDEX IF NOT EXISTS idx_sales_table ON sales(table_id)');
+
+  // Early installs of product_channel_prices had `price NOT NULL` and no
+  // `available` column (price-override only, no per-channel availability).
+  // SQLite can't drop a NOT NULL constraint in place, so rebuild the table.
+  const pcpCols = db.prepare("PRAGMA table_info(product_channel_prices)").all().map((c) => c.name);
+  if (pcpCols.length && !pcpCols.includes('available')) {
+    db.exec(`
+      CREATE TABLE product_channel_prices_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+        price REAL,
+        available INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(product_id, channel_id)
+      );
+      INSERT INTO product_channel_prices_new (id, product_id, channel_id, price)
+        SELECT id, product_id, channel_id, price FROM product_channel_prices;
+      DROP TABLE product_channel_prices;
+      ALTER TABLE product_channel_prices_new RENAME TO product_channel_prices;
+      CREATE INDEX IF NOT EXISTS idx_product_channel_prices_product ON product_channel_prices(product_id);
+    `);
+  }
 }
 migrate();
 
@@ -320,7 +356,16 @@ function seed() {
       'INSERT INTO users (name, pin_hash, role, is_default) VALUES (?, ?, ?, 1)'
     );
     insertUser.run('Admin', bcrypt.hashSync('826497', 10), 'admin');
+    insertUser.run('Manager', bcrypt.hashSync('651248', 10), 'manager');
     insertUser.run('Cashier', bcrypt.hashSync('123456', 10), 'cashier');
+  }
+  // Installs from before the default Manager account existed won't have hit
+  // the userCount === 0 branch above — backfill it separately so upgrading
+  // doesn't require a fresh database.
+  const defaultManager = db.prepare("SELECT id FROM users WHERE role = 'manager' AND is_default = 1").get();
+  if (!defaultManager) {
+    db.prepare('INSERT INTO users (name, pin_hash, role, is_default) VALUES (?, ?, ?, 1)')
+      .run('Manager', bcrypt.hashSync('651248', 10), 'manager');
   }
 
   const tableCount = db.prepare('SELECT COUNT(*) c FROM tables').get().c;

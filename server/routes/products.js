@@ -14,10 +14,20 @@ function isValidTaxRate(tax_rate) {
 }
 
 router.get('/', (req, res) => {
-  const { q, category_id, active } = req.query;
-  let sql = `SELECT p.*, c.name as category_name FROM products p
-             LEFT JOIN categories c ON c.id = p.category_id WHERE 1=1`;
+  const { q, category_id, active, channel_id } = req.query;
+  // channel_id swaps in that channel's price override (e.g. FoodPanda/GrabFood
+  // menu prices, marked up to absorb the platform's commission) wherever one
+  // exists, and reports whether the item is offered on that channel at all —
+  // products.price stays the reported "price" field either way, so callers
+  // that don't care about channels don't need to change.
+  let sql = `SELECT p.*, c.name as category_name${channel_id ? ', COALESCE(cp.price, p.price) as price, COALESCE(cp.available, 1) as channel_available' : ''} FROM products p
+             LEFT JOIN categories c ON c.id = p.category_id`;
   const params = [];
+  if (channel_id) {
+    sql += ` LEFT JOIN product_channel_prices cp ON cp.product_id = p.id AND cp.channel_id = ?`;
+    params.push(channel_id);
+  }
+  sql += ` WHERE 1=1`;
   if (q) {
     sql += ` AND (p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?)`;
     params.push(`%${q}%`, `%${q}%`, `%${q}%`);
@@ -32,6 +42,28 @@ router.get('/', (req, res) => {
   }
   sql += ` ORDER BY p.name`;
   res.json(db.prepare(sql).all(...params));
+});
+
+router.get('/:id/channel-prices', (req, res) => {
+  res.json(db.prepare('SELECT channel_id, price, available FROM product_channel_prices WHERE product_id = ?').all(req.params.id));
+});
+
+router.put('/:id/channel-prices/:channelId', requireRole('admin', 'manager'), (req, res) => {
+  const { price, available } = req.body;
+  const product = db.prepare('SELECT id FROM products WHERE id = ?').get(req.params.id);
+  if (!product) return res.status(404).json({ error: 'Product not found' });
+  const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.channelId);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+
+  const hasPrice = !(price === null || price === undefined || price === '');
+  const n = hasPrice ? Number(price) : null;
+  if (hasPrice && (!Number.isFinite(n) || n < 0)) return res.status(400).json({ error: 'Price must be a non-negative number' });
+  const avail = available === undefined ? 1 : (available ? 1 : 0);
+  db.prepare(`
+    INSERT INTO product_channel_prices (product_id, channel_id, price, available) VALUES (?, ?, ?, ?)
+    ON CONFLICT(product_id, channel_id) DO UPDATE SET price = excluded.price, available = excluded.available
+  `).run(req.params.id, req.params.channelId, n, avail);
+  res.json({ ok: true, price: n, available: Boolean(avail) });
 });
 
 router.get('/low-stock', (req, res) => {

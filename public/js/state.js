@@ -6,5 +6,5 @@ window.APP_STATE = {
   customer: null,
   channel: null,
   shift: null,
-  scPwdDiscount: { type: 'none', idNumber: '', holderName: '' },
+  scPwdDiscount: { type: 'none', idNumber: '', holderName: '', isTakeout: false },
 };

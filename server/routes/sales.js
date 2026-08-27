@@ -38,13 +38,37 @@ function resolveChannelId(channelId) {
   return row ? row.id : null;
 }
 
+// A channel's price override (e.g. FoodPanda/GrabFood menu prices, marked up
+// to absorb the platform's commission) always wins over whatever price the
+// client sent — same reasoning as trusting the DB for tax_rate: the price a
+// channel charges isn't something a cashier should be able to override.
+function channelPriceOverride(productId, channelId) {
+  if (!productId || !channelId) return null;
+  const row = db.prepare('SELECT price FROM product_channel_prices WHERE product_id = ? AND channel_id = ?').get(productId, channelId);
+  return row ? row.price : null;
+}
+
+// Some menu items aren't offered on a given delivery platform at all — a
+// missing row means available (the common case), so only an explicit
+// available = 0 row blocks the sale.
+function channelAvailable(productId, channelId) {
+  if (!productId || !channelId) return true;
+  const row = db.prepare('SELECT available FROM product_channel_prices WHERE product_id = ? AND channel_id = ?').get(productId, channelId);
+  return row ? Boolean(row.available) : true;
+}
+
 function getOpenShift(userId) {
   return db.prepare(`SELECT * FROM shifts WHERE user_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1`).get(userId);
 }
 
-// Every route that rings up or bills a sale requires the acting user to have
-// their own open cash drawer shift first — sales aren't attributable to a
-// drawer otherwise, and end-of-day reconciliation would have no home for them.
+// Every route that rings up or bills a sale requires the acting cashier or
+// manager to have their own open cash drawer shift first — sales aren't
+// attributable to a drawer otherwise, and end-of-day reconciliation would
+// have no home for them. Only admins are exempt; if one happens to have a
+// shift open anyway, the sale still attributes to it.
+function requireShiftForRole(role) {
+  return role !== 'admin';
+}
 const NO_SHIFT_ERROR = 'Open a cash drawer shift before ringing up sales — go to Cash Drawer to start one.';
 
 // Editing a line item that's already been sent to the kitchen needs an
@@ -134,27 +158,50 @@ router.post('/checkout', (req, res) => {
   }
 
   const shift = getOpenShift(req.session.userId);
-  if (!shift) return res.status(400).json({ error: NO_SHIFT_ERROR });
+  if (!shift && requireShiftForRole(req.session.role)) return res.status(400).json({ error: NO_SHIFT_ERROR });
+
+  const resolvedChannelId = resolveChannelId(channel_id);
 
   const tx = db.transaction(() => {
     const lineData = [];
     for (const item of items) {
       const product = item.product_id ? db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id) : null;
+      if (product && !channelAvailable(product.id, resolvedChannelId)) {
+        throw new Error(`${product.name} is not available on this order channel`);
+      }
       const qty = Number(item.qty) || 1;
-      const price = Number(item.price ?? product?.price ?? 0);
+      const override = channelPriceOverride(product?.id, resolvedChannelId);
+      const price = Number(override ?? item.price ?? product?.price ?? 0);
       const taxRate = Number(item.tax_rate ?? product?.tax_rate ?? 0);
       const manualDiscount = Number(item.discount) || 0;
-      const scPwdEligible = scPwdType !== 'none' && Boolean(item.sc_pwd_eligible);
-      const { discount, taxAmount, vatExemptAmount, lineTotal } = computeSaleLine({
-        price, qty, taxRate, manualDiscount, scPwdEligible,
-      });
-      lineData.push({
-        product_id: product ? product.id : null,
-        name: item.name || product?.name || 'Item',
-        price, qty, discount, tax_rate: taxRate, tax_amount: taxAmount,
-        vat_exempt_amount: vatExemptAmount, sc_pwd_eligible: scPwdEligible ? 1 : 0,
-        notes: item.notes || null, line_total: lineTotal,
-      });
+      const name = item.name || product?.name || 'Item';
+      const product_id = product ? product.id : null;
+
+      // A line can be partially SC/PWD-eligible (e.g. 2 of 3 units consumed
+      // by the cardholder, or takeout's single discounted unit within a
+      // bigger quantity) — split it into two sale_item rows, one per
+      // eligible/regular sub-quantity, each priced through the normal
+      // formula. manualDiscount isn't currently settable from any UI (always
+      // 0 in practice), so it's applied to the regular portion only.
+      const eligibleQty = scPwdType !== 'none' ? Math.max(0, Math.min(Number(item.sc_pwd_eligible_qty) || 0, qty)) : 0;
+      const regularQty = qty - eligibleQty;
+
+      if (eligibleQty > 0) {
+        const elig = computeSaleLine({ price, qty: eligibleQty, taxRate, manualDiscount: 0, scPwdEligible: true });
+        lineData.push({
+          product_id, name, price, qty: eligibleQty, discount: elig.discount, tax_rate: taxRate,
+          tax_amount: elig.taxAmount, vat_exempt_amount: elig.vatExemptAmount, sc_pwd_eligible: 1,
+          notes: item.notes || null, line_total: elig.lineTotal,
+        });
+      }
+      if (regularQty > 0) {
+        const reg = computeSaleLine({ price, qty: regularQty, taxRate, manualDiscount, scPwdEligible: false });
+        lineData.push({
+          product_id, name, price, qty: regularQty, discount: reg.discount, tax_rate: taxRate,
+          tax_amount: reg.taxAmount, vat_exempt_amount: reg.vatExemptAmount, sc_pwd_eligible: 0,
+          notes: item.notes || null, line_total: reg.lineTotal,
+        });
+      }
     }
 
     const total = lineData.reduce((s, l) => s + l.line_total, 0);
@@ -168,7 +215,7 @@ router.post('/checkout', (req, res) => {
       INSERT INTO sales (sale_number, user_id, customer_id, shift_id, channel_id, order_status, billed_at, discount_type, discount_id_number, discount_holder_name, note)
       VALUES (?, ?, ?, ?, ?, 'billed', datetime('now'), ?, ?, ?, ?)
     `).run(
-      saleNumber, req.session.userId, customer_id || null, shift.id, resolveChannelId(channel_id),
+      saleNumber, req.session.userId, customer_id || null, shift ? shift.id : null, resolvedChannelId,
       scPwdType, scPwdType !== 'none' ? discount_id_number : null, scPwdType !== 'none' ? discount_holder_name : null,
       note || null
     );
@@ -244,7 +291,7 @@ router.post('/orders', (req, res) => {
   if (!table) return res.status(404).json({ error: 'Table not found' });
 
   const shift = getOpenShift(req.session.userId);
-  if (!shift) return res.status(400).json({ error: NO_SHIFT_ERROR });
+  if (!shift && requireShiftForRole(req.session.role)) return res.status(400).json({ error: NO_SHIFT_ERROR });
 
   const tx = db.transaction(() => {
     let sale = db.prepare(`SELECT * FROM sales WHERE table_id = ? AND order_status = 'open'`).get(table_id);
@@ -254,7 +301,7 @@ router.post('/orders', (req, res) => {
       const info = db.prepare(`
         INSERT INTO sales (sale_number, user_id, table_id, shift_id, channel_id, order_status, note)
         VALUES (?, ?, ?, ?, ?, 'open', ?)
-      `).run(saleNumber, req.session.userId, table_id, shift.id, resolveChannelId(null), note || null);
+      `).run(saleNumber, req.session.userId, table_id, shift ? shift.id : null, resolveChannelId(null), note || null);
       saleId = info.lastInsertRowid;
     } else {
       saleId = sale.id;
@@ -413,22 +460,46 @@ router.post('/:id/bill', (req, res) => {
     return res.status(400).json({ error: 'Senior Citizen / PWD ID number and holder name are required for this discount' });
   }
   const eligibilityByItem = {};
-  for (const i of (items || [])) eligibilityByItem[i.sale_item_id] = Boolean(i.sc_pwd_eligible);
+  for (const i of (items || [])) eligibilityByItem[i.sale_item_id] = Number(i.sc_pwd_eligible_qty) || 0;
 
   const shift = getOpenShift(req.session.userId);
-  if (!shift) return res.status(400).json({ error: NO_SHIFT_ERROR });
+  if (!shift && requireShiftForRole(req.session.role)) return res.status(400).json({ error: NO_SHIFT_ERROR });
 
   const tx = db.transaction(() => {
     const updateItem = db.prepare(`
-      UPDATE sale_items SET discount = ?, tax_amount = ?, vat_exempt_amount = ?, sc_pwd_eligible = ?, line_total = ? WHERE id = ?
+      UPDATE sale_items SET qty = ?, discount = ?, tax_amount = ?, vat_exempt_amount = ?, sc_pwd_eligible = ?, line_total = ? WHERE id = ?
+    `);
+    const insertSplitItem = db.prepare(`
+      INSERT INTO sale_items (sale_id, product_id, name, price, qty, discount, tax_rate, tax_amount, vat_exempt_amount, sc_pwd_eligible, notes, sent_to_kitchen, line_total)
+      VALUES (@sale_id, @product_id, @name, @price, @qty, @discount, @tax_rate, @tax_amount, @vat_exempt_amount, @sc_pwd_eligible, @notes, 1, @line_total)
     `);
     for (const item of sale.items) {
       if (item.voided) continue;
-      const scPwdEligible = scPwdType !== 'none' && Boolean(eligibilityByItem[item.id]);
-      const { discount, taxAmount, vatExemptAmount, lineTotal } = computeSaleLine({
-        price: item.price, qty: item.qty, taxRate: item.tax_rate, manualDiscount: 0, scPwdEligible,
-      });
-      updateItem.run(discount, taxAmount, vatExemptAmount, scPwdEligible ? 1 : 0, lineTotal, item.id);
+      // A line can be partially eligible (e.g. 2 of 3 units consumed by the
+      // cardholder) — split it into two rows, one per eligible/regular
+      // sub-quantity, so the receipt/records reflect the real breakdown.
+      // Total qty across the split never changes, so stock (already
+      // deducted when this round was sent to the kitchen) isn't affected.
+      const eligibleQty = scPwdType !== 'none' ? Math.max(0, Math.min(eligibilityByItem[item.id] || 0, item.qty)) : 0;
+      const regularQty = item.qty - eligibleQty;
+
+      if (eligibleQty > 0 && regularQty > 0) {
+        const reg = computeSaleLine({ price: item.price, qty: regularQty, taxRate: item.tax_rate, manualDiscount: 0, scPwdEligible: false });
+        updateItem.run(regularQty, reg.discount, reg.taxAmount, reg.vatExemptAmount, 0, reg.lineTotal, item.id);
+
+        const elig = computeSaleLine({ price: item.price, qty: eligibleQty, taxRate: item.tax_rate, manualDiscount: 0, scPwdEligible: true });
+        insertSplitItem.run({
+          sale_id: sale.id, product_id: item.product_id, name: item.name, price: item.price, qty: eligibleQty,
+          discount: elig.discount, tax_rate: item.tax_rate, tax_amount: elig.taxAmount,
+          vat_exempt_amount: elig.vatExemptAmount, sc_pwd_eligible: 1, notes: item.notes, line_total: elig.lineTotal,
+        });
+      } else {
+        const scPwdEligible = eligibleQty > 0;
+        const { discount, taxAmount, vatExemptAmount, lineTotal } = computeSaleLine({
+          price: item.price, qty: item.qty, taxRate: item.tax_rate, manualDiscount: 0, scPwdEligible,
+        });
+        updateItem.run(item.qty, discount, taxAmount, vatExemptAmount, scPwdEligible ? 1 : 0, lineTotal, item.id);
+      }
     }
     recomputeSaleTotals(sale.id);
 
@@ -448,7 +519,7 @@ router.post('/:id/bill', (req, res) => {
         discount_type = ?, discount_id_number = ?, discount_holder_name = ?, customer_id = COALESCE(?, customer_id)
       WHERE id = ?
     `).run(
-      shift.id, scPwdType,
+      shift ? shift.id : null, scPwdType,
       scPwdType !== 'none' ? discount_id_number : null, scPwdType !== 'none' ? discount_holder_name : null,
       customer_id || null, sale.id
     );

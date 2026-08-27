@@ -38,7 +38,7 @@ async function renderUsersView(container) {
   renderTable();
 
   container.appendChild(header);
-  container.appendChild(el('p', { style: 'color:var(--text-muted);font-size:13px;margin-top:-8px;' }, 'Cashiers can use Register, Tables, and their own Cash Drawer. Managers can also manage Inventory, Customers, Reports, refunds, and Settings. Admins have full access, including staff accounts. The first Admin and Cashier accounts are protected defaults and can\'t be deactivated.'));
+  container.appendChild(el('p', { style: 'color:var(--text-muted);font-size:13px;margin-top:-8px;' }, 'Cashiers can use Register, Tables, and their own Cash Drawer. Managers can also manage Inventory, Customers, Reports, refunds, and Settings. Admins have full access, including staff accounts. The default Admin, Manager, and Cashier accounts are protected — they can\'t be deactivated or have their role changed (name and PIN can still be edited).'));
   container.appendChild(tableWrap);
 }
 
@@ -46,14 +46,19 @@ function openUserModal(user, onDone) {
   const isEdit = Boolean(user);
   const nameInput = el('input', { type: 'text', value: user ? user.name : '' });
   const pinInput = el('input', { type: 'text', placeholder: isEdit ? 'Leave blank to keep current PIN' : '4-8 digit PIN', maxlength: '8' });
-  const roleSelect = el('select', {}, ['cashier', 'manager', 'admin'].map((r) => el('option', { value: r, selected: user && user.role === r ? 'true' : null }, r)));
+  const roleLocked = Boolean(user && user.is_default);
+  const roleSelect = el('select', { disabled: roleLocked ? 'true' : null }, ['cashier', 'manager', 'admin'].map((r) => el('option', { value: r, selected: user && user.role === r ? 'true' : null }, r)));
   const errorEl = el('div', { class: 'login-error' }, '');
   const backdrop = el('div', { class: 'modal-backdrop' });
 
   const modal = el('div', { class: 'modal' }, [
     el('h3', {}, isEdit ? 'Edit Staff' : 'Add Staff'),
     el('div', { class: 'field' }, [el('label', {}, 'Name'), nameInput]),
-    el('div', { class: 'field' }, [el('label', {}, 'Role'), roleSelect]),
+    el('div', { class: 'field' }, [
+      el('label', {}, 'Role'),
+      roleSelect,
+      roleLocked ? el('div', { style: 'font-size:12px;color:var(--text-muted);margin-top:4px;' }, 'This is a default account — its role can\'t be changed.') : null,
+    ].filter(Boolean)),
     el('div', { class: 'field' }, [el('label', {}, 'PIN'), pinInput]),
     errorEl,
     el('div', { class: 'modal-actions' }, [

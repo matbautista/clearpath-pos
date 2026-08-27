@@ -24,6 +24,14 @@ router.put('/:id', (req, res) => {
   if (!existing) return res.status(404).json({ error: 'User not found' });
   const { name, role, active, pin } = req.body;
 
+  // The default Admin/Manager/Cashier accounts are what guarantee at least
+  // one login exists for each role — letting their role be reassigned could
+  // leave the store with no cashier (or no manager, or no admin) account at
+  // all. Name and PIN can still change; only the role is locked.
+  if (existing.is_default && role !== undefined && role !== existing.role) {
+    return res.status(400).json({ error: `${existing.name} is a default account — its role can't be changed.` });
+  }
+
   // Whether this edit would take the store's last active admin off of the
   // admin role — by demotion or deactivation — leaving nobody who can manage
   // staff or approve the sent-to-kitchen edit/void PIN prompt.

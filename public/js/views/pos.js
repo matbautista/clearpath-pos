@@ -2,6 +2,41 @@ let posProducts = [];
 let posCategories = [];
 let posActiveCategory = null;
 let posChannels = [];
+let posRefreshGridRef = null;
+
+function productsUrl(state) {
+  return `/api/products?active=true${state.channel ? `&channel_id=${state.channel.id}` : ''}`;
+}
+
+// Reloads the product list priced for whatever channel is currently
+// selected (FoodPanda/GrabFood menu prices are marked up to absorb that
+// platform's commission), and re-prices any cart lines already added under
+// a different channel so the cart always reflects the active channel's price.
+// Also flags cart lines for items that turn out not to be offered on the
+// newly selected channel — they stay in the cart (not silently dropped) but
+// can't be charged until removed; the server enforces this too.
+async function refreshProductsForChannel() {
+  const state = window.APP_STATE;
+  try {
+    posProducts = await api.get(productsUrl(state));
+  } catch (e) {
+    toast(e.message, 'error');
+    return;
+  }
+  const blockedNames = [];
+  for (const line of state.cart) {
+    const p = posProducts.find((pp) => pp.id === line.product_id);
+    if (p) {
+      line.price = p.price;
+      if (p.channel_available === 0) blockedNames.push(p.name);
+    }
+  }
+  if (blockedNames.length) {
+    toast(`Not available on ${state.channel ? state.channel.name : 'this channel'}: ${blockedNames.join(', ')} — remove before charging`, 'error');
+  }
+  if (posRefreshGridRef) posRefreshGridRef();
+  refreshCartPanel();
+}
 
 async function renderPosView(container) {
   container.innerHTML = '';
@@ -9,7 +44,7 @@ async function renderPosView(container) {
 
   try {
     [posProducts, posCategories, state.shift, posChannels] = await Promise.all([
-      api.get('/api/products?active=true'),
+      api.get(productsUrl(state)),
       api.get('/api/categories'),
       api.get('/api/shifts/current'),
       api.get('/api/channels?active=true'),
@@ -18,7 +53,8 @@ async function renderPosView(container) {
     toast(e.message, 'error');
   }
 
-  if (!state.shift) {
+  // Only admins are exempt from having their own open cash drawer shift.
+  if (!state.shift && state.user.role !== 'admin') {
     container.appendChild(el('div', { style: 'display:flex;align-items:center;justify-content:center;height:calc(100vh - 40px);' }, [
       el('div', { class: 'card', style: 'max-width:420px;text-align:center;padding:32px;' }, [
         el('div', { style: 'font-size:32px;margin-bottom:8px;' }, '🗄️'),
@@ -62,21 +98,26 @@ async function renderPosView(container) {
     }
     for (const p of items) {
       const outOfStock = p.track_stock && p.stock_qty <= 0;
+      const channelBlocked = p.channel_available === 0;
+      const disabled = outOfStock || channelBlocked;
       grid.appendChild(el('button', {
-        class: `product-tile ${outOfStock ? 'out' : ''}`,
+        class: `product-tile ${disabled ? 'out' : ''}`,
         style: productTileStyle(p),
-        disabled: outOfStock ? 'true' : null,
+        disabled: disabled ? 'true' : null,
         onclick: () => addToCart(p),
       }, [
         el('div', { class: 'name' }, p.name),
         el('div', {}, [
           el('div', { class: 'price' }, money(p.price)),
-          el('div', { class: 'stock' }, p.track_stock ? `${p.stock_qty} in stock` : ''),
+          el('div', { class: 'stock' }, channelBlocked
+            ? `Not on ${state.channel ? state.channel.name : 'channel'}`
+            : (p.track_stock ? `${p.stock_qty} in stock` : '')),
         ]),
       ]));
     }
   }
   refreshGrid();
+  posRefreshGridRef = refreshGrid;
 
   const posLeft = el('div', { class: 'pos-left' }, [
     el('div', { class: 'scan-bar' }, [scanInput]),
@@ -103,6 +144,10 @@ async function handleBarcode(code) {
 
 function addToCart(product) {
   const state = window.APP_STATE;
+  if (product.channel_available === 0) {
+    toast(`${product.name} is not available on ${state.channel ? state.channel.name : 'this channel'}`, 'error');
+    return;
+  }
   const existing = state.cart.find((l) => l.product_id === product.id);
   if (existing) {
     if (product.track_stock && existing.qty + 1 > product.stock_qty) {
@@ -112,10 +157,20 @@ function addToCart(product) {
     existing.qty += 1;
   } else {
     if (product.track_stock && product.stock_qty <= 0) { toast('Out of stock', 'error'); return; }
+    const takeoutActive = state.scPwdDiscount.type !== 'none' && state.scPwdDiscount.isTakeout;
     state.cart.push({
       product_id: product.id, name: product.name, price: product.price,
       tax_rate: product.tax_rate, qty: 1, discount: 0, track_stock: product.track_stock, stock_qty: product.stock_qty,
-      sc_pwd_eligible: true,
+      // How many units of this line are SC/PWD-eligible (0..qty), not just a
+      // yes/no — a line can be partly eligible (e.g. 2 of 3 consumed by the
+      // cardholder). undefined means "fully eligible, tracks qty" — the
+      // dine-in default, so tapping the same product again to bump qty keeps
+      // the whole line eligible without extra bookkeeping here; it only
+      // becomes a fixed number once staff explicitly edits the checkbox/qty
+      // input. Takeout defaults to a fixed 0 since only a single unit — the
+      // priciest item's — should ever qualify when consumption can't be
+      // tracked; staff picks which one.
+      sc_pwd_eligible_qty: takeoutActive ? 0 : undefined,
     });
   }
   refreshCartPanel();
@@ -123,18 +178,41 @@ function addToCart(product) {
 
 // Mirrors the checkout math in server/routes/sales.js: RA 9994 (Senior
 // Citizens) / RA 10754 (PWD) mandate 20% off the VAT-exclusive price, with
-// the sale becoming VAT-exempt, for lines marked eligible.
-function computeLine(line) {
-  const scPwdActive = window.APP_STATE.scPwdDiscount.type !== 'none' && line.sc_pwd_eligible;
-  const gross = line.price * line.qty - line.discount;
-  if (scPwdActive) {
-    const vatExclusive = gross / (1 + line.tax_rate);
+// the sale becoming VAT-exempt, for the eligible portion of a line.
+function computeSubtotal(price, qty, taxRate, manualDiscount, scPwdEligible) {
+  const gross = price * qty - manualDiscount;
+  if (scPwdEligible) {
+    const vatExclusive = gross / (1 + taxRate);
     const vatExemptAmount = gross - vatExclusive;
     const scPwdDiscount = vatExclusive * 0.2;
-    return { taxAmount: 0, vatExemptAmount, lineDiscount: line.discount + scPwdDiscount, lineTotal: vatExclusive - scPwdDiscount };
+    return { taxAmount: 0, vatExemptAmount, discount: manualDiscount + scPwdDiscount, lineTotal: vatExclusive - scPwdDiscount };
   }
-  const taxAmount = gross * line.tax_rate;
-  return { taxAmount, vatExemptAmount: 0, lineDiscount: line.discount, lineTotal: gross + taxAmount };
+  const taxAmount = gross * taxRate;
+  return { taxAmount, vatExemptAmount: 0, discount: manualDiscount, lineTotal: gross + taxAmount };
+}
+
+// A line can be partially eligible (e.g. 2 of 3 units consumed by the
+// cardholder) — split it into an eligible sub-quantity and a regular
+// sub-quantity and sum their results. sc_pwd_eligible_qty === 0 or === qty
+// collapses back to the old fully-not/fully-eligible behavior.
+function computeLine(line) {
+  const scPwdActive = window.APP_STATE.scPwdDiscount.type !== 'none';
+  // undefined sc_pwd_eligible_qty means "fully eligible, tracks qty" (the
+  // dine-in default) — only a concrete number (explicitly set by staff, incl.
+  // 0) overrides that, so ?? (not ||) is required here.
+  const eligibleQty = scPwdActive ? Math.max(0, Math.min(line.sc_pwd_eligible_qty ?? line.qty, line.qty)) : 0;
+  const regularQty = line.qty - eligibleQty;
+  // line.discount (manual per-line discount) isn't currently settable from
+  // any UI — it's always 0 in practice, so it's applied to the regular
+  // portion only rather than splitting it proportionally.
+  const elig = computeSubtotal(line.price, eligibleQty, line.tax_rate, 0, true);
+  const reg = computeSubtotal(line.price, regularQty, line.tax_rate, line.discount, false);
+  return {
+    taxAmount: elig.taxAmount + reg.taxAmount,
+    vatExemptAmount: elig.vatExemptAmount + reg.vatExemptAmount,
+    lineDiscount: elig.discount + reg.discount,
+    lineTotal: elig.lineTotal + reg.lineTotal,
+  };
 }
 
 function cartTotals() {
@@ -175,9 +253,9 @@ function refreshCartPanel() {
         class: `btn small ${discountLabel ? '' : 'ghost'}`,
         style: discountLabel ? 'background:#1ea672;border-color:#1ea672;color:#fff;' : '',
         onclick: () => openScPwdModal(refreshCartPanel),
-      }, discountLabel ? `🎫 ${discountLabel}` : '🎫 SC/PWD'),
+      }, discountLabel ? `🎫 ${discountLabel}${discount.isTakeout ? ' 🥡' : ''}` : '🎫 SC/PWD'),
       el('button', { class: 'btn ghost small', onclick: () => { state.customer = null; openCustomerPicker(refreshCartPanel); } }, state.customer ? state.customer.name : '+ Customer'),
-      el('button', { class: 'btn ghost small', onclick: () => openChannelPicker(refreshCartPanel) }, `🛵 ${state.channel ? state.channel.name : 'Walk-in'}`),
+      el('button', { class: 'btn ghost small', onclick: () => openChannelPicker(refreshProductsForChannel) }, `🛵 ${state.channel ? state.channel.name : 'Walk-in'}`),
     ]),
   ]);
 
@@ -187,15 +265,28 @@ function refreshCartPanel() {
   } else {
     cart.forEach((line, idx) => {
       const c = computeLine(line);
+      // Any dish, any quantity can carry the discount — checkboxes are
+      // independent (not mutually exclusive). A qty-1 line is a plain
+      // checkbox; a qty>1 line gets a number input so staff can pick exactly
+      // how many units of it qualify (e.g. 2 of 3 consumed by the cardholder).
       const eligibilityToggle = discountLabel
         ? el('label', { style: 'display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);white-space:nowrap;' }, [
-            (() => {
-              const cb = el('input', { type: 'checkbox' });
-              cb.checked = Boolean(line.sc_pwd_eligible);
-              cb.addEventListener('change', () => { line.sc_pwd_eligible = cb.checked; refreshCartPanel(); });
-              return cb;
-            })(),
-            discountLabel,
+            line.qty <= 1
+              ? (() => {
+                  const cb = el('input', { type: 'checkbox' });
+                  cb.checked = (line.sc_pwd_eligible_qty ?? line.qty) >= 1;
+                  cb.addEventListener('change', () => { line.sc_pwd_eligible_qty = cb.checked ? 1 : 0; refreshCartPanel(); });
+                  return cb;
+                })()
+              : (() => {
+                  const numInput = el('input', { type: 'number', min: '0', max: String(line.qty), step: '1', value: String(line.sc_pwd_eligible_qty ?? line.qty), style: 'width:42px;padding:2px 4px;' });
+                  numInput.addEventListener('input', () => {
+                    line.sc_pwd_eligible_qty = Math.max(0, Math.min(line.qty, Number(numInput.value) || 0));
+                    refreshCartPanel();
+                  });
+                  return numInput;
+                })(),
+            line.qty <= 1 ? discountLabel : `/${line.qty} ${discountLabel}`,
           ])
         : null;
       itemsEl.appendChild(el('div', { class: 'cart-item' }, [
@@ -225,7 +316,7 @@ function refreshCartPanel() {
   ].filter(Boolean));
 
   const actions = el('div', { class: 'cart-actions' }, [
-    el('button', { class: 'btn ghost', onclick: () => { state.cart = []; state.customer = null; state.channel = null; state.scPwdDiscount = { type: 'none', idNumber: '', holderName: '' }; refreshCartPanel(); } }, 'Clear'),
+    el('button', { class: 'btn ghost', onclick: () => { state.cart = []; state.customer = null; state.channel = null; state.scPwdDiscount = { type: 'none', idNumber: '', holderName: '', isTakeout: false }; refreshProductsForChannel(); } }, 'Clear'),
     el('button', {
       class: 'btn primary', disabled: cart.length === 0 ? 'true' : null,
       onclick: () => openPaymentModal(cartTotals(), completeSale),
@@ -245,6 +336,7 @@ function changeQty(idx, delta) {
   if (newQty <= 0) { cart.splice(idx, 1); refreshCartPanel(); return; }
   if (line.track_stock && newQty > line.stock_qty) { toast(`Only ${line.stock_qty} in stock`, 'error'); return; }
   line.qty = newQty;
+  if (line.sc_pwd_eligible_qty > newQty) line.sc_pwd_eligible_qty = newQty;
   refreshCartPanel();
 }
 
@@ -306,6 +398,28 @@ function openChannelPicker(onDone) {
   document.body.appendChild(backdrop);
 }
 
+// Defaults eligibility for takeout: only ONE unit of the single
+// highest-priced (per-unit) cart line starts out marked, everything else 0
+// — since staff can't know which of the ordered items the PWD/senior will
+// actually eat, per BIR/DTI guidance the discount defaults to just one unit
+// of the most expensive item. This is only a starting point, not an ongoing
+// constraint — staff can still check any other dish/quantity afterward.
+function selectHighestPriceLine(cart) {
+  for (const line of cart) line.sc_pwd_eligible_qty = 0;
+  if (cart.length === 0) return;
+  let top = cart[0];
+  for (const line of cart) if (line.price > top.price) top = line;
+  top.sc_pwd_eligible_qty = Math.min(1, top.qty);
+}
+
+// Reverses selectHighestPriceLine(): undefined reads as "fully eligible,
+// tracks qty" everywhere it's consumed (see computeLine), so un-checking
+// takeout after it was applied must clear the restrictive zeros it left
+// behind rather than leaving most of the cart stuck ineligible.
+function clearEligibilityOverrides(cart) {
+  for (const line of cart) line.sc_pwd_eligible_qty = undefined;
+}
+
 function openScPwdModal(onDone) {
   const state = window.APP_STATE;
   const current = state.scPwdDiscount;
@@ -313,6 +427,8 @@ function openScPwdModal(onDone) {
   const backdrop = el('div', { class: 'modal-backdrop' });
   const idInput = el('input', { type: 'text', value: current.idNumber || '', placeholder: 'e.g. OSCA/PWD ID number' });
   const nameInput = el('input', { type: 'text', value: current.holderName || '', placeholder: 'Full name on the ID' });
+  const takeoutInput = el('input', { type: 'checkbox' });
+  takeoutInput.checked = Boolean(current.isTakeout);
   const errorEl = el('div', { class: 'login-error' }, '');
 
   const typeButtons = el('div', { class: 'tender-methods', style: 'grid-template-columns:repeat(2,1fr);' }, [
@@ -324,22 +440,31 @@ function openScPwdModal(onDone) {
     backdrop.innerHTML = '';
     const modal = el('div', { class: 'modal' }, [
       el('h3', {}, 'Senior Citizen / PWD Discount'),
-      el('p', { style: 'font-size:12.5px;color:var(--text-muted);margin-top:-6px;' }, '20% discount + VAT exemption per RA 9994 / RA 10754. Uncheck any line items in the cart that don’t qualify (e.g. alcohol, tobacco).'),
+      el('p', { style: 'font-size:12.5px;color:var(--text-muted);margin-top:-6px;' }, '20% discount + VAT exemption per RA 9994 / RA 10754. Check off in the cart exactly which items the cardholder is actually consuming — for a dine-in order that\'s usually everything; uncheck anything a companion is eating instead.'),
       typeButtons,
       el('div', { class: 'field', style: 'margin-top:10px;' }, [el('label', {}, `${type === 'senior' ? 'OSCA' : 'PWD'} ID Number`), idInput]),
       el('div', { class: 'field' }, [el('label', {}, 'Cardholder Name'), nameInput]),
+      el('label', { style: 'display:flex;align-items:center;gap:8px;font-size:13px;margin-top:4px;' }, [
+        takeoutInput,
+        '🥡 Takeout — we can\'t know what the cardholder eats, so only the single most expensive item qualifies',
+      ]),
       errorEl,
       el('div', { class: 'modal-actions' }, [
         current.type !== 'none' ? el('button', { class: 'btn ghost', onclick: () => {
-          state.scPwdDiscount = { type: 'none', idNumber: '', holderName: '' };
+          state.scPwdDiscount = { type: 'none', idNumber: '', holderName: '', isTakeout: false };
           document.body.removeChild(backdrop);
           onDone();
         } }, 'Remove Discount') : null,
         el('button', { class: 'btn', onclick: () => document.body.removeChild(backdrop) }, 'Cancel'),
         el('button', { class: 'btn primary', onclick: () => {
           if (!idInput.value.trim() || !nameInput.value.trim()) { errorEl.textContent = 'ID number and name are required'; return; }
-          state.scPwdDiscount = { type, idNumber: idInput.value.trim(), holderName: nameInput.value.trim() };
-          for (const line of state.cart) if (line.sc_pwd_eligible === undefined) line.sc_pwd_eligible = true;
+          const isTakeout = takeoutInput.checked;
+          state.scPwdDiscount = { type, idNumber: idInput.value.trim(), holderName: nameInput.value.trim(), isTakeout };
+          // Switching to dine-in (incl. reversing a previous takeout
+          // selection) must restore full eligibility, not just leave
+          // whatever takeout's zeros left behind.
+          if (isTakeout) selectHighestPriceLine(state.cart);
+          else clearEligibilityOverrides(state.cart);
           document.body.removeChild(backdrop);
           onDone();
         } }, 'Apply'),
@@ -458,7 +583,10 @@ async function completeSale(payments, backdrop) {
   const state = window.APP_STATE;
   const items = state.cart.map((l) => ({
     product_id: l.product_id, name: l.name, price: l.price, qty: l.qty, discount: l.discount, tax_rate: l.tax_rate,
-    sc_pwd_eligible: Boolean(l.sc_pwd_eligible),
+    // undefined here means "fully eligible" (see computeLine) — resolve it
+    // to a concrete number before sending since the server has no concept
+    // of "tracks qty", only an explicit eligible count.
+    sc_pwd_eligible_qty: l.sc_pwd_eligible_qty ?? l.qty,
   }));
   try {
     const sale = await api.post('/api/sales/checkout', {
@@ -472,8 +600,8 @@ async function completeSale(payments, backdrop) {
     state.cart = [];
     state.customer = null;
     state.channel = null;
-    state.scPwdDiscount = { type: 'none', idNumber: '', holderName: '' };
-    refreshCartPanel();
+    state.scPwdDiscount = { type: 'none', idNumber: '', holderName: '', isTakeout: false };
+    await refreshProductsForChannel();
     toast(`Sale ${sale.sale_number} completed`, 'success');
     await openReceiptModal(sale.id);
   } catch (e) {

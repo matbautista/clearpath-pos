@@ -119,10 +119,29 @@ async function renderInventoryView(container) {
   container.appendChild(body);
 }
 
-function openProductModal(product, categories, onDone) {
+async function openProductModal(product, categories, onDone) {
   const isEdit = Boolean(product);
   const defaultTaxRate = Number(window.APP_STATE.settings.default_tax_rate) || 0.12;
   const data = product ? { ...product } : { name: '', sku: '', barcode: '', category_id: '', price: 0, cost: 0, tax_rate: defaultTaxRate, stock_qty: 0, low_stock_threshold: 5, track_stock: true, color: '#4f7cff', image_url: '' };
+
+  // Delivery channels (FoodPanda, GrabFood, …) can charge a different price
+  // than the walk-in menu — marked up to absorb the platform's commission —
+  // and some menu items aren't offered on a given platform at all. Walk-in
+  // itself always uses the regular price and is never toggled off, so it's
+  // excluded here.
+  let deliveryChannels = [];
+  let channelSettingsMap = {};
+  try {
+    deliveryChannels = (await api.get('/api/channels')).filter((c) => c.name !== 'Walk-in');
+    if (isEdit) {
+      const rows = await api.get(`/api/products/${product.id}/channel-prices`);
+      for (const r of rows) channelSettingsMap[r.channel_id] = { price: r.price, available: Boolean(r.available) };
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  const channelPriceInputs = {};
+  const channelAvailableInputs = {};
 
   const backdrop = el('div', { class: 'modal-backdrop' });
   const nameInput = el('input', { type: 'text', value: data.name });
@@ -165,8 +184,16 @@ function openProductModal(product, categories, onDone) {
       return;
     }
     try {
+      let savedId = product ? product.id : null;
       if (isEdit) await api.put(`/api/products/${product.id}`, payload);
-      else await api.post('/api/products', payload);
+      else savedId = (await api.post('/api/products', payload)).id;
+      if (isEdit) {
+        for (const c of deliveryChannels) {
+          const raw = channelPriceInputs[c.id].value.trim();
+          const available = channelAvailableInputs[c.id].checked;
+          await api.put(`/api/products/${savedId}/channel-prices/${c.id}`, { price: raw === '' ? null : Number(raw), available });
+        }
+      }
       document.body.removeChild(backdrop);
       onDone();
     } catch (e) {
@@ -196,6 +223,29 @@ function openProductModal(product, categories, onDone) {
       el('div', { class: 'field' }, [el('label', {}, 'Tile Color'), colorInput]),
       el('div', { class: 'field' }, [el('label', {}, 'Track Stock'), trackStockInput]),
     ]),
+    isEdit && deliveryChannels.length > 0
+      ? el('div', { class: 'field' }, [
+          el('label', {}, 'Delivery Channels (uncheck if not on that menu; price is optional and uses the regular price above when blank)'),
+          el('div', { style: 'display:flex;flex-direction:column;gap:8px;' }, deliveryChannels.map((c) => {
+            const settings = channelSettingsMap[c.id];
+            const availableInput = el('input', { type: 'checkbox' });
+            availableInput.checked = settings ? settings.available : true;
+            channelAvailableInputs[c.id] = availableInput;
+            const priceInput = el('input', {
+              type: 'number', step: '0.01', min: '0',
+              placeholder: `${data.price} (regular)`,
+              value: settings && settings.price !== null && settings.price !== undefined ? String(settings.price) : '',
+            });
+            channelPriceInputs[c.id] = priceInput;
+            return el('div', { style: 'display:flex;align-items:center;gap:8px;' }, [
+              el('label', { style: 'display:flex;align-items:center;gap:6px;min-width:130px;font-size:13px;color:var(--text-muted);' }, [availableInput, c.name]),
+              priceInput,
+            ]);
+          })),
+        ])
+      : (deliveryChannels.length > 0
+          ? el('p', { style: 'color:var(--text-muted);font-size:12.5px;' }, 'Save this product first, then edit it to set FoodPanda/GrabFood pricing and availability.')
+          : null),
     errorEl,
     el('div', { class: 'modal-actions' }, [
       el('button', { class: 'btn', onclick: () => document.body.removeChild(backdrop) }, 'Cancel'),

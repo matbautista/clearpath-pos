@@ -7,7 +7,8 @@ async function renderTablesView(container) {
   const user = state.user;
   state.shift = await api.get('/api/shifts/current');
 
-  if (!state.shift) {
+  // Only admins are exempt from having their own open cash drawer shift.
+  if (!state.shift && user.role !== 'admin') {
     container.appendChild(el('div', { style: 'display:flex;align-items:center;justify-content:center;height:calc(100vh - 40px);' }, [
       el('div', { class: 'card', style: 'max-width:420px;text-align:center;padding:32px;' }, [
         el('div', { style: 'font-size:32px;margin-bottom:8px;' }, '🗄️'),
@@ -35,7 +36,12 @@ async function renderTablesView(container) {
   }
   tables.forEach((t) => {
     const occupied = Boolean(t.open_sale);
-    const carriedOver = occupied && t.open_sale.shift_id === null;
+    // shift_id is null either because the order's original shift closed
+    // while it was still open (a real hand-off — see /shifts/:id/close), or
+    // because it was opened by an admin/manager, who aren't required to have
+    // one at all. Either way there's no shift claiming it yet, so the label
+    // stays neutral rather than assuming a hand-off happened.
+    const noShift = occupied && t.open_sale.shift_id === null;
     grid.appendChild(el('button', {
       class: 'product-tile',
       style: `background:${occupied ? '#e0473f' : '#1ea672'};min-height:100px;`,
@@ -43,11 +49,11 @@ async function renderTablesView(container) {
     }, [
       el('div', { class: 'name', style: 'font-size:16px;' }, [
         t.name,
-        carriedOver ? el('span', { style: 'margin-left:6px;font-size:11px;' }, '⏳') : null,
+        noShift ? el('span', { style: 'margin-left:6px;font-size:11px;' }, '⏳') : null,
       ].filter(Boolean)),
       el('div', {}, [
         el('div', { class: 'price' }, occupied ? money(t.open_sale.total) : 'Available'),
-        el('div', { class: 'stock' }, occupied ? (carriedOver ? `${t.open_sale.item_count} item(s) · carried over` : `${t.open_sale.item_count} item(s) · open`) : ''),
+        el('div', { class: 'stock' }, occupied ? (noShift ? `${t.open_sale.item_count} item(s) · no shift` : `${t.open_sale.item_count} item(s) · open`) : ''),
       ]),
     ]));
   });
@@ -96,9 +102,9 @@ async function renderTableOrderScreen(container, table) {
   container.innerHTML = '';
   let openOrder = await api.get(`/api/sales/table/${table.id}/open`);
   let newItems = []; // this round, not sent yet: { product_id, name, price, tax_rate, qty, notes }
-  let orderDiscount = { type: 'none', idNumber: '', holderName: '' };
+  let orderDiscount = { type: 'none', idNumber: '', holderName: '', isTakeout: false };
   let orderCustomer = null;
-  const eligibility = {}; // sale_item_id -> bool, used only once billing starts
+  const eligibility = {}; // sale_item_id -> eligible qty (0..item.qty), used only once billing starts
 
   [tablesProducts, tablesCategories] = await Promise.all([
     api.get('/api/products?active=true'),
@@ -157,23 +163,48 @@ async function renderTableOrderScreen(container, table) {
 
   function addNewItem(product) {
     const existing = newItems.find((l) => l.product_id === product.id && !l.notes);
-    if (existing) existing.qty += 1;
-    else newItems.push({ product_id: product.id, name: product.name, price: product.price, tax_rate: product.tax_rate, qty: 1, notes: '' });
+    if (existing) {
+      existing.qty += 1;
+    } else {
+      const takeoutActive = orderDiscount.type !== 'none' && orderDiscount.isTakeout;
+      // undefined means "fully eligible, tracks qty" (the dine-in default),
+      // so tapping the same product again to bump qty keeps the whole line
+      // eligible without extra bookkeeping here.
+      newItems.push({ product_id: product.id, name: product.name, price: product.price, tax_rate: product.tax_rate, qty: 1, notes: '', sc_pwd_eligible_qty: takeoutActive ? 0 : undefined });
+    }
     refreshOrderPanel();
   }
 
-  // Mirrors computeSaleLine() in server/routes/sales.js for a live preview.
-  function computeBillLine(item) {
-    const scPwdActive = orderDiscount.type !== 'none' && Boolean(eligibility[item.id]);
-    const gross = item.price * item.qty;
-    if (scPwdActive) {
-      const vatExclusive = gross / (1 + item.tax_rate);
+  // Mirrors computeSaleLine() in server/routes/sales.js for a live preview. A
+  // line can be partially eligible (e.g. 2 of 3 units consumed by the
+  // cardholder) — split it into an eligible sub-quantity and a regular
+  // sub-quantity and sum their results.
+  function computeSubtotal(price, qty, taxRate, scPwdEligible) {
+    const gross = price * qty;
+    if (scPwdEligible) {
+      const vatExclusive = gross / (1 + taxRate);
       const vatExemptAmount = gross - vatExclusive;
       const scPwdDiscount = vatExclusive * 0.2;
       return { taxAmount: 0, vatExemptAmount, discount: scPwdDiscount, lineTotal: vatExclusive - scPwdDiscount };
     }
-    const taxAmount = gross * item.tax_rate;
+    const taxAmount = gross * taxRate;
     return { taxAmount, vatExemptAmount: 0, discount: 0, lineTotal: gross + taxAmount };
+  }
+
+  function computeBillLine(item) {
+    const scPwdActive = orderDiscount.type !== 'none';
+    // A missing eligibility[item.id] means "fully eligible, tracks qty" (the
+    // dine-in default) — only an explicit number (incl. 0) overrides that.
+    const eligibleQty = scPwdActive ? Math.max(0, Math.min(eligibility[item.id] ?? item.qty, item.qty)) : 0;
+    const regularQty = item.qty - eligibleQty;
+    const elig = computeSubtotal(item.price, eligibleQty, item.tax_rate, true);
+    const reg = computeSubtotal(item.price, regularQty, item.tax_rate, false);
+    return {
+      taxAmount: elig.taxAmount + reg.taxAmount,
+      vatExemptAmount: elig.vatExemptAmount + reg.vatExemptAmount,
+      discount: elig.discount + reg.discount,
+      lineTotal: elig.lineTotal + reg.lineTotal,
+    };
   }
 
   function billTotals() {
@@ -190,6 +221,41 @@ async function renderTableOrderScreen(container, table) {
     return { subtotal, discountTotal, taxTotal, vatExemptTotal, total };
   }
 
+  // Every eligible-for-discount item currently on the order — sent-to-kitchen
+  // lines (keyed by sale_item id in `eligibility`) plus this round's unsent
+  // drafts (keyed on the line object itself).
+  function allOrderLines() {
+    return [...(openOrder ? openOrder.items.filter((i) => !i.voided) : []), ...newItems];
+  }
+
+  // Defaults eligibility for takeout: only ONE unit of the single
+  // highest-priced (per-unit) item across the whole order — sent or not —
+  // starts out marked, everything else 0, since staff can't know which item
+  // the PWD/senior will actually eat. Mirrors selectHighestPriceLine() in
+  // pos.js. This is only a starting point, not an ongoing constraint — staff
+  // can still check any other dish/quantity afterward.
+  function selectHighestPriceEligible() {
+    for (const i of (openOrder ? openOrder.items.filter((i) => !i.voided) : [])) eligibility[i.id] = 0;
+    for (const l of newItems) l.sc_pwd_eligible_qty = 0;
+    const lines = allOrderLines();
+    if (lines.length === 0) return;
+    let top = lines[0];
+    for (const l of lines) if (l.price > top.price) top = l;
+    const qty = Math.min(1, top.qty);
+    if (top.id !== undefined) eligibility[top.id] = qty;
+    else top.sc_pwd_eligible_qty = qty;
+  }
+
+  // Reverses selectHighestPriceEligible(): a missing eligibility[id] /
+  // undefined sc_pwd_eligible_qty reads as "fully eligible, tracks qty"
+  // everywhere it's consumed, so un-checking takeout after it was applied
+  // must clear the restrictive zeros it left behind rather than leaving
+  // most of the order stuck ineligible.
+  function clearEligibilityOverrides() {
+    for (const i of (openOrder ? openOrder.items.filter((i) => !i.voided) : [])) delete eligibility[i.id];
+    for (const l of newItems) l.sc_pwd_eligible_qty = undefined;
+  }
+
   const orderPanelRef = el('div', { class: 'pos-right' });
 
   function refreshOrderPanel() {
@@ -203,7 +269,7 @@ async function renderTableOrderScreen(container, table) {
           class: `btn small ${discountLabel ? '' : 'ghost'}`,
           style: discountLabel ? 'background:#1ea672;border-color:#1ea672;color:#fff;' : '',
           onclick: () => openTableScPwdModal(),
-        }, discountLabel ? `🎫 ${discountLabel}` : '🎫 SC/PWD'),
+        }, discountLabel ? `🎫 ${discountLabel}${orderDiscount.isTakeout ? ' 🥡' : ''}` : '🎫 SC/PWD'),
         el('button', {
           class: 'btn ghost small',
           onclick: () => openTableCustomerPicker((c) => { orderCustomer = c; refreshOrderPanel(); }),
@@ -219,15 +285,28 @@ async function renderTableOrderScreen(container, table) {
     if (sentItems.length) {
       itemsEl.appendChild(el('div', { style: 'font-size:11px;color:var(--text-muted);font-weight:700;text-transform:uppercase;margin:6px 4px 2px;' }, 'Sent to kitchen'));
       sentItems.forEach((line) => {
+        // Any dish, any quantity can carry the discount — checkboxes are
+        // independent. A qty-1 line is a plain checkbox; a qty>1 line gets a
+        // number input so staff can pick exactly how many units qualify.
         const eligToggle = discountLabel ? el('label', { style: 'display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);white-space:nowrap;' }, [
           (() => {
-            if (eligibility[line.id] === undefined) eligibility[line.id] = true;
-            const cb = el('input', { type: 'checkbox' });
-            cb.checked = eligibility[line.id];
-            cb.addEventListener('change', () => { eligibility[line.id] = cb.checked; refreshOrderPanel(); });
-            return cb;
+            // A missing eligibility[line.id] means "fully eligible, tracks
+            // qty" (the dine-in default) — only an explicit number (incl. 0)
+            // overrides that.
+            if (line.qty <= 1) {
+              const cb = el('input', { type: 'checkbox' });
+              cb.checked = (eligibility[line.id] ?? line.qty) >= 1;
+              cb.addEventListener('change', () => { eligibility[line.id] = cb.checked ? 1 : 0; refreshOrderPanel(); });
+              return cb;
+            }
+            const numInput = el('input', { type: 'number', min: '0', max: String(line.qty), step: '1', value: String(eligibility[line.id] ?? line.qty), style: 'width:42px;padding:2px 4px;' });
+            numInput.addEventListener('input', () => {
+              eligibility[line.id] = Math.max(0, Math.min(line.qty, Number(numInput.value) || 0));
+              refreshOrderPanel();
+            });
+            return numInput;
           })(),
-          discountLabel,
+          line.qty <= 1 ? discountLabel : `/${line.qty} ${discountLabel}`,
         ]) : null;
         itemsEl.appendChild(el('div', { class: 'cart-item' }, [
           el('div', { class: 'info' }, [
@@ -250,17 +329,42 @@ async function renderTableOrderScreen(container, table) {
       newItems.forEach((line, idx) => {
         const notesInput = el('input', { type: 'text', placeholder: 'note (e.g. no onions)', value: line.notes, style: 'font-size:12px;padding:5px 8px;' });
         notesInput.addEventListener('input', () => { line.notes = notesInput.value; });
+        const eligToggle = discountLabel ? el('label', { style: 'display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);white-space:nowrap;' }, [
+          (() => {
+            // A missing sc_pwd_eligible_qty means "fully eligible, tracks
+            // qty" (the dine-in default) — only an explicit number (incl. 0)
+            // overrides that.
+            if (line.qty <= 1) {
+              const cb = el('input', { type: 'checkbox' });
+              cb.checked = (line.sc_pwd_eligible_qty ?? line.qty) >= 1;
+              cb.addEventListener('change', () => { line.sc_pwd_eligible_qty = cb.checked ? 1 : 0; refreshOrderPanel(); });
+              return cb;
+            }
+            const numInput = el('input', { type: 'number', min: '0', max: String(line.qty), step: '1', value: String(line.sc_pwd_eligible_qty ?? line.qty), style: 'width:42px;padding:2px 4px;' });
+            numInput.addEventListener('input', () => {
+              line.sc_pwd_eligible_qty = Math.max(0, Math.min(line.qty, Number(numInput.value) || 0));
+              refreshOrderPanel();
+            });
+            return numInput;
+          })(),
+          line.qty <= 1 ? discountLabel : `/${line.qty} ${discountLabel}`,
+        ]) : null;
         itemsEl.appendChild(el('div', { class: 'cart-item', style: 'flex-direction:column;align-items:stretch;gap:5px;' }, [
           el('div', { style: 'display:flex;align-items:center;gap:8px;' }, [
             el('div', { class: 'info' }, [el('div', { class: 'name' }, line.name)]),
+            eligToggle,
             el('div', { class: 'qty-control' }, [
-              el('button', { onclick: () => { if (line.qty > 1) line.qty--; else newItems.splice(idx, 1); refreshOrderPanel(); } }, '−'),
+              el('button', { onclick: () => {
+                if (line.qty > 1) { line.qty--; if (line.sc_pwd_eligible_qty > line.qty) line.sc_pwd_eligible_qty = line.qty; }
+                else newItems.splice(idx, 1);
+                refreshOrderPanel();
+              } }, '−'),
               el('span', {}, String(line.qty)),
               el('button', { onclick: () => { line.qty++; refreshOrderPanel(); } }, '+'),
             ]),
             el('div', { class: 'line-total' }, money(line.price * line.qty)),
             el('button', { class: 'remove-line', onclick: () => { newItems.splice(idx, 1); refreshOrderPanel(); } }, '✕'),
-          ]),
+          ].filter(Boolean)),
           notesInput,
         ]));
       });
@@ -312,6 +416,7 @@ async function renderTableOrderScreen(container, table) {
     if (adminPin === null) return;
     try {
       openOrder = await api.post(`/api/sales/${openOrder.id}/items/${item.id}/edit`, { qty: newQty, admin_pin: adminPin });
+      if (eligibility[item.id] > newQty) eligibility[item.id] = newQty;
       toast(newQty === 0 ? 'Item removed' : 'Item updated', 'success');
       refreshOrderPanel();
     } catch (e) {
@@ -325,6 +430,16 @@ async function renderTableOrderScreen(container, table) {
       const sale = await api.post('/api/sales/orders', {
         table_id: table.id,
         items: newItems.map((l) => ({ product_id: l.product_id, qty: l.qty, notes: l.notes || null })),
+      });
+      // The response's newly-inserted rows (not yet sent_to_kitchen) line up
+      // positionally with newItems, in the same order they were posted —
+      // carry each draft line's eligibility choice over to its real
+      // sale_item id before newItems (and those choices) are discarded.
+      const newlyAdded = sale.items.filter((i) => !i.voided && !i.sent_to_kitchen);
+      newlyAdded.forEach((item, idx) => {
+        // Carry the draft's value as-is, including undefined ("fully
+        // eligible, tracks qty") — don't collapse it to 0.
+        if (newItems[idx]) eligibility[item.id] = newItems[idx].sc_pwd_eligible_qty;
       });
       newItems = [];
       const result = await api.post(`/api/sales/${sale.id}/send-to-kitchen`);
@@ -345,7 +460,10 @@ async function renderTableOrderScreen(container, table) {
     const totals = billTotals();
     openPaymentModal(totals, async (payments, backdrop) => {
       try {
-        const itemsPayload = openOrder.items.filter((i) => !i.voided).map((i) => ({ sale_item_id: i.id, sc_pwd_eligible: Boolean(eligibility[i.id]) }));
+        // undefined here means "fully eligible" (see computeBillLine) —
+        // resolve it to a concrete number since the server has no concept of
+        // "tracks qty", only an explicit eligible count.
+        const itemsPayload = openOrder.items.filter((i) => !i.voided).map((i) => ({ sale_item_id: i.id, sc_pwd_eligible_qty: eligibility[i.id] ?? i.qty }));
         const billed = await api.post(`/api/sales/${openOrder.id}/bill`, {
           payments,
           discount_type: orderDiscount.type,
@@ -404,30 +522,39 @@ async function renderTableOrderScreen(container, table) {
     const backdrop = el('div', { class: 'modal-backdrop' });
     const idInput = el('input', { type: 'text', value: orderDiscount.idNumber || '', placeholder: 'e.g. OSCA/PWD ID number' });
     const nameInput = el('input', { type: 'text', value: orderDiscount.holderName || '', placeholder: 'Full name on the ID' });
+    const takeoutInput = el('input', { type: 'checkbox' });
+    takeoutInput.checked = Boolean(orderDiscount.isTakeout);
     const errorEl = el('div', { class: 'login-error' }, '');
 
     function renderModal() {
       backdrop.innerHTML = '';
       const modal = el('div', { class: 'modal' }, [
         el('h3', {}, 'Senior Citizen / PWD Discount'),
-        el('p', { style: 'font-size:12.5px;color:var(--text-muted);margin-top:-6px;' }, '20% discount + VAT exemption per RA 9994 / RA 10754. Uncheck any items that don’t qualify.'),
+        el('p', { style: 'font-size:12.5px;color:var(--text-muted);margin-top:-6px;' }, '20% discount + VAT exemption per RA 9994 / RA 10754. Check off exactly which items the cardholder is actually consuming — uncheck anything a companion is eating instead.'),
         el('div', { class: 'tender-methods', style: 'grid-template-columns:repeat(2,1fr);' }, [
           el('button', { class: type === 'senior' ? 'active' : '', onclick: () => { type = 'senior'; renderModal(); } }, 'Senior Citizen'),
           el('button', { class: type === 'pwd' ? 'active' : '', onclick: () => { type = 'pwd'; renderModal(); } }, 'PWD'),
         ]),
         el('div', { class: 'field', style: 'margin-top:10px;' }, [el('label', {}, `${type === 'senior' ? 'OSCA' : 'PWD'} ID Number`), idInput]),
         el('div', { class: 'field' }, [el('label', {}, 'Cardholder Name'), nameInput]),
+        el('label', { style: 'display:flex;align-items:center;gap:8px;font-size:13px;margin-top:4px;' }, [
+          takeoutInput,
+          '🥡 Takeout — we can\'t know what the cardholder eats, so only the single most expensive item qualifies',
+        ]),
         errorEl,
         el('div', { class: 'modal-actions' }, [
           orderDiscount.type !== 'none' ? el('button', { class: 'btn ghost', onclick: () => {
-            orderDiscount = { type: 'none', idNumber: '', holderName: '' };
+            orderDiscount = { type: 'none', idNumber: '', holderName: '', isTakeout: false };
             document.body.removeChild(backdrop);
             refreshOrderPanel();
           } }, 'Remove Discount') : null,
           el('button', { class: 'btn', onclick: () => document.body.removeChild(backdrop) }, 'Cancel'),
           el('button', { class: 'btn primary', onclick: () => {
             if (!idInput.value.trim() || !nameInput.value.trim()) { errorEl.textContent = 'ID number and name are required'; return; }
-            orderDiscount = { type, idNumber: idInput.value.trim(), holderName: nameInput.value.trim() };
+            const isTakeout = takeoutInput.checked;
+            orderDiscount = { type, idNumber: idInput.value.trim(), holderName: nameInput.value.trim(), isTakeout };
+            if (isTakeout) selectHighestPriceEligible();
+            else clearEligibilityOverrides();
             document.body.removeChild(backdrop);
             refreshOrderPanel();
           } }, 'Apply'),
