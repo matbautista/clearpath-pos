@@ -117,7 +117,7 @@ async function renderSummaryTab(container) {
       salesPage = 1;
       return load();
     } else {
-      const table = el('table', {}, [el('thead', {}, el('tr', {}, ['Receipt #', 'Date', 'Cashier', 'Table', 'Customer', 'Total', 'Status', ''].map((h) => el('th', {}, h))))]);
+      const table = el('table', {}, [el('thead', {}, el('tr', {}, ['Receipt #', 'Date', 'Cashier', 'Table / Slot', 'Customer', 'Total', 'Status', ''].map((h) => el('th', {}, h))))]);
       const tbody = el('tbody');
       sales.forEach((s) => {
         tbody.appendChild(el('tr', {}, [
@@ -155,12 +155,9 @@ async function renderSummaryTab(container) {
   const archiveYears = await api.get('/api/archive/years');
   const eligibleYears = archiveYears.liveYears.filter((y) => y.eligible).map((y) => y.year).sort((a, b) => a - b);
   if (eligibleYears.length > 0) {
-    container.appendChild(el('div', { class: 'card', style: 'margin-bottom:16px;background:#fdf2e0;border-color:#f0d9a8;color:#4a3510;display:flex;justify-content:space-between;align-items:center;gap:12px;' }, [
-      el('span', {}, [
-        el('strong', {}, `⚠ ${eligibleYears.join(', ')} `),
-        `${eligibleYears.length === 1 ? 'has' : 'have'} records eligible to archive — archiving keeps this Reports page fast without deleting anything.`,
-      ]),
-      el('button', { class: 'btn small', style: 'flex-shrink:0;background:#4a3510;border-color:#4a3510;color:#fdf2e0;', onclick: () => navigate('settings') }, 'Go to Settings'),
+    container.appendChild(el('div', { class: 'card', style: 'margin-bottom:16px;background:#fdf2e0;border-color:#f0d9a8;color:#4a3510;' }, [
+      el('strong', {}, `⚠ ${eligibleYears.join(', ')} `),
+      `${eligibleYears.length === 1 ? 'has' : 'have'} records eligible to archive — see Sales Archive below.`,
     ]));
   }
 
@@ -168,6 +165,156 @@ async function renderSummaryTab(container) {
   container.appendChild(statsGrid);
   container.appendChild(topProductsCard);
   container.appendChild(salesCard);
+
+  const archiveCard = el('div', { class: 'card', style: 'margin-top:18px;' });
+  container.appendChild(archiveCard);
+  await renderArchiveCard(archiveCard);
+}
+
+// Reports is full-access for managers (can trigger a new archive run), and
+// view-only for admins (can browse years/sales already archived, but not
+// archive a new one).
+async function renderArchiveCard(archiveCard) {
+  const canManage = window.APP_STATE.user.role === 'manager';
+
+  async function refresh() {
+    const data = await api.get('/api/archive/years');
+    archiveCard.innerHTML = '';
+    archiveCard.appendChild(el('h3', { style: 'margin-top:0;' }, 'Sales Archive'));
+    archiveCard.appendChild(el('p', { style: 'font-size:13px;color:var(--text-muted);' },
+      `Records from ${data.hotFromYear} onward stay above for fast lookup. Older complete years can be archived — they're exported to a file and moved out, never deleted, and stay searchable below.`));
+
+    const liveRows = data.liveYears.filter((y) => y.eligible);
+    if (liveRows.length === 0) {
+      archiveCard.appendChild(el('p', { style: 'font-size:13px;color:var(--text-muted);' }, 'No years are eligible to archive yet.'));
+    } else {
+      const table = el('table', {}, [el('thead', {}, el('tr', {}, ['Year', 'Records', ''].map((h) => el('th', {}, h))))]);
+      const tbody = el('tbody');
+      liveRows.forEach((y) => {
+        tbody.appendChild(el('tr', {}, [
+          el('td', {}, String(y.year)),
+          el('td', {}, String(y.count)),
+          el('td', {}, canManage ? el('button', {
+            class: 'btn small',
+            onclick: async () => {
+              if (!confirm(`Archive all ${y.count} record(s) from ${y.year}? They'll be exported to a file and moved out of live Reports — nothing is deleted.`)) return;
+              try {
+                const result = await api.post(`/api/archive/${y.year}`);
+                toast(`Archived ${result.sale_count} record(s) from ${y.year}`, 'success');
+                await refresh();
+              } catch (e) { toast(e.message, 'error'); }
+            },
+          }, `Archive ${y.year}`) : null),
+        ]));
+      });
+      table.appendChild(tbody);
+      archiveCard.appendChild(table);
+    }
+
+    archiveCard.appendChild(el('h3', {}, 'Archived Years'));
+    if (data.archived.length === 0) {
+      archiveCard.appendChild(el('p', { style: 'font-size:13px;color:var(--text-muted);' }, 'Nothing archived yet.'));
+    } else {
+      const table = el('table', {}, [el('thead', {}, el('tr', {}, ['Year', 'Records', 'Archived By', 'Archived At', ''].map((h) => el('th', {}, h))))]);
+      const tbody = el('tbody');
+      const browsePanel = el('div');
+      data.archived.forEach((a) => {
+        tbody.appendChild(el('tr', {}, [
+          el('td', {}, String(a.year)),
+          el('td', {}, String(a.sale_count)),
+          el('td', {}, a.archived_by_name || '—'),
+          el('td', {}, a.archived_at),
+          el('td', {}, el('div', { style: 'display:flex;gap:6px;' }, [
+            el('button', { class: 'btn small', onclick: () => renderArchivedYearBrowser(browsePanel, a.year) }, 'View'),
+            el('a', { class: 'btn small', href: `/api/archive/${a.year}/download` }, 'Download'),
+          ])),
+        ]));
+      });
+      table.appendChild(tbody);
+      archiveCard.appendChild(table);
+      archiveCard.appendChild(browsePanel);
+    }
+  }
+  await refresh();
+}
+
+// Paginated, read-only browser for one archived year's sales — the "stay
+// searchable below" promise made above. Renders into `container`, replacing
+// whatever was shown for a previously-picked year.
+async function renderArchivedYearBrowser(container, year) {
+  let page = 1;
+  const PAGE_SIZE = 20;
+
+  async function load() {
+    const { sales, total } = await api.get(`/api/archive/${year}/sales?page=${page}&pageSize=${PAGE_SIZE}`);
+    container.innerHTML = '';
+    const card = el('div', { class: 'card', style: 'margin-top:10px;' });
+    card.appendChild(el('h4', { style: 'margin-top:0;' }, `${year} Archived Sales`));
+    if (total === 0) {
+      card.appendChild(el('div', { class: 'empty-state' }, 'No archived sales found for this year.'));
+      container.appendChild(card);
+      return;
+    }
+    const table = el('table', {}, [el('thead', {}, el('tr', {},
+      ['Receipt #', 'Date', 'Cashier', 'Customer', 'Total', 'Status', ''].map((h) => el('th', {}, h))))]);
+    const tbody = el('tbody');
+    sales.forEach((s) => {
+      tbody.appendChild(el('tr', {}, [
+        el('td', {}, s.sale_number),
+        el('td', {}, s.created_at),
+        el('td', {}, s.cashier_name || '—'),
+        el('td', {}, s.customer_name || '—'),
+        el('td', {}, money(s.total)),
+        el('td', {}, el('span', { class: `badge ${s.status}` }, s.status.replace('_', ' '))),
+        el('td', {}, el('button', { class: 'btn small', onclick: () => openArchivedSaleDetailModal(s.id) }, 'View')),
+      ]));
+    });
+    table.appendChild(tbody);
+    card.appendChild(table);
+
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    card.appendChild(el('div', { style: 'display:flex;justify-content:space-between;align-items:center;margin-top:12px;' }, [
+      el('span', { style: 'color:var(--text-muted);font-size:13px;' }, `Page ${page} of ${totalPages} (${total} total)`),
+      el('div', { style: 'display:flex;gap:8px;' }, [
+        el('button', { class: 'btn small', disabled: page <= 1 ? 'true' : null, onclick: () => { page -= 1; load(); } }, 'Prev'),
+        el('button', { class: 'btn small', disabled: page >= totalPages ? 'true' : null, onclick: () => { page += 1; load(); } }, 'Next'),
+      ]),
+    ]));
+    container.appendChild(card);
+  }
+  await load();
+}
+
+async function openArchivedSaleDetailModal(saleId) {
+  const sale = await api.get(`/api/archive/sales/${saleId}`);
+  const backdrop = el('div', { class: 'modal-backdrop' });
+  const modal = el('div', { class: 'modal', style: 'width:520px;' }, [
+    el('h3', {}, `Sale ${sale.sale_number} (Archived)`),
+    el('div', { style: 'font-size:13px;color:var(--text-muted);margin-bottom:10px;' }, [
+      `${sale.created_at} · Cashier: ${sale.cashier_name || '—'}`,
+      sale.table_name ? ` · Table: ${sale.table_name}` : '',
+      sale.customer_name ? ` · Customer: ${sale.customer_name}` : '',
+    ]),
+    el('span', { class: `badge ${sale.status}` }, sale.status.replace('_', ' ')),
+    el('table', { style: 'margin-top:12px;' }, [
+      el('thead', {}, el('tr', {}, ['Item', 'Qty', 'Refunded', 'Line Total'].map((h) => el('th', {}, h)))),
+      el('tbody', {}, sale.items.map((i) => el('tr', {}, [
+        el('td', {}, i.voided ? `${i.name} (removed, not charged)` : i.name),
+        el('td', {}, String(i.qty)),
+        el('td', {}, String(i.refunded_qty)),
+        el('td', {}, i.voided ? '—' : money(i.line_total)),
+      ]))),
+    ]),
+    sale.discount_total ? el('div', { class: 'totals-row' }, [el('span', {}, 'Discount'), el('span', {}, `-${money(sale.discount_total)}`)]) : null,
+    sale.vat_exempt_total ? el('div', { class: 'totals-row' }, [el('span', {}, 'VAT-Exempt Sales'), el('span', {}, money(sale.vat_exempt_total))]) : null,
+    el('div', { class: 'totals-row grand' }, [el('span', {}, 'Total'), el('span', {}, money(sale.total))]),
+    el('div', { class: 'modal-actions' }, [
+      el('button', { class: 'btn', onclick: () => document.body.removeChild(backdrop) }, 'Close'),
+    ]),
+  ].filter(Boolean));
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) document.body.removeChild(backdrop); });
 }
 
 // ---- Metrics tab: business trend charts ----
@@ -466,15 +613,18 @@ async function renderCustomerMetrics(container) {
 async function openSaleDetailModal(saleId, onDone) {
   const sale = await api.get(`/api/sales/${saleId}`);
   const backdrop = el('div', { class: 'modal-backdrop' });
+  // Reports is full-access for managers, view-only for admins — void/refund
+  // are the "transact" actions reserved for managers here.
+  const canManage = window.APP_STATE.user.role === 'manager';
 
   function refreshModal(freshSale) {
     backdrop.innerHTML = '';
-    const canAct = freshSale.status === 'completed' || freshSale.status === 'partially_refunded';
+    const canAct = canManage && (freshSale.status === 'completed' || freshSale.status === 'partially_refunded');
     const modal = el('div', { class: 'modal', style: 'width:520px;' }, [
       el('h3', {}, `Sale ${freshSale.sale_number}`),
       el('div', { style: 'font-size:13px;color:var(--text-muted);margin-bottom:10px;' }, [
         `${freshSale.created_at} · Cashier: ${freshSale.cashier_name}`,
-        freshSale.table_name ? ` · Table: ${freshSale.table_name}` : '',
+        freshSale.table_name ? ` · Table: ${freshSale.table_name}` : (freshSale.register_slot_name ? ` · ${freshSale.register_slot_name}` : ''),
         freshSale.customer_name ? ` · Customer: ${freshSale.customer_name}` : '',
       ]),
       el('span', { class: `badge ${freshSale.status}` }, freshSale.status.replace('_', ' ')),
@@ -496,7 +646,7 @@ async function openSaleDetailModal(saleId, onDone) {
       el('div', { class: 'modal-actions' }, [
         el('button', { class: 'btn', onclick: () => document.body.removeChild(backdrop) }, 'Close'),
         canAct ? el('button', { class: 'btn', onclick: () => openRefundModal(freshSale, (updated) => refreshModal(updated)) }, 'Refund Items') : null,
-        freshSale.status === 'completed' ? el('button', { class: 'btn danger', onclick: async () => {
+        (canManage && freshSale.status === 'completed') ? el('button', { class: 'btn danger', onclick: async () => {
           if (!confirm('Void this entire sale? This restores stock and cannot be undone.')) return;
           try {
             const updated = await api.post(`/api/sales/${freshSale.id}/void`);

@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   pin_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin','manager','cashier')),
+  role TEXT NOT NULL CHECK (role IN ('admin','manager','cashier','waiter')),
   active INTEGER NOT NULL DEFAULT 1,
   is_default INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -61,6 +61,16 @@ CREATE TABLE IF NOT EXISTS tables (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Register "customer" slots — the walk-in-order counterpart to tables.id:
+-- since a counter order has no physical table to distinguish it from another
+-- one in progress at the same time, staff pick one of these instead.
+CREATE TABLE IF NOT EXISTS register_slots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS shifts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id),
@@ -71,6 +81,18 @@ CREATE TABLE IF NOT EXISTS shifts (
   opened_at TEXT NOT NULL DEFAULT (datetime('now')),
   closed_at TEXT,
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed'))
+);
+
+-- One row per successful login. Cashiers already get an implicit record of
+-- their time on the clock via shifts (opened_at/closed_at), but admin,
+-- manager, and waiter never open one, so this is the only record of when
+-- they were actually using the POS. role is captured at login time (not
+-- joined from users.role) so a later role change doesn't rewrite history.
+CREATE TABLE IF NOT EXISTS login_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  role TEXT NOT NULL,
+  logged_in_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -109,6 +131,7 @@ CREATE TABLE IF NOT EXISTS sales (
   status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('completed','voided','refunded','partially_refunded')),
   order_status TEXT NOT NULL DEFAULT 'billed' CHECK (order_status IN ('open','billed')),
   table_id INTEGER REFERENCES tables(id) ON DELETE SET NULL,
+  register_slot_id INTEGER REFERENCES register_slots(id) ON DELETE SET NULL,
   discount_type TEXT NOT NULL DEFAULT 'none' CHECK (discount_type IN ('none','senior','pwd')),
   discount_id_number TEXT,
   discount_holder_name TEXT,
@@ -199,6 +222,7 @@ CREATE TABLE IF NOT EXISTS sales_archive (
   status TEXT NOT NULL,
   order_status TEXT NOT NULL,
   table_id INTEGER,
+  register_slot_id INTEGER,
   discount_type TEXT NOT NULL DEFAULT 'none',
   discount_id_number TEXT,
   discount_holder_name TEXT,
@@ -285,6 +309,8 @@ CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id);
 CREATE INDEX IF NOT EXISTS idx_sales_table ON sales(table_id);
 CREATE INDEX IF NOT EXISTS idx_product_channel_prices_product ON product_channel_prices(product_id);
+CREATE INDEX IF NOT EXISTS idx_login_log_user ON login_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_login_log_logged_in ON login_log(logged_in_at);
 `);
 
 function migrate() {
@@ -304,6 +330,7 @@ function migrate() {
   if (!salesCols.includes('discount_holder_name')) db.exec('ALTER TABLE sales ADD COLUMN discount_holder_name TEXT');
   if (!salesCols.includes('order_status')) db.exec("ALTER TABLE sales ADD COLUMN order_status TEXT NOT NULL DEFAULT 'billed'");
   if (!salesCols.includes('table_id')) db.exec('ALTER TABLE sales ADD COLUMN table_id INTEGER');
+  if (!salesCols.includes('register_slot_id')) db.exec('ALTER TABLE sales ADD COLUMN register_slot_id INTEGER REFERENCES register_slots(id) ON DELETE SET NULL');
   if (!salesCols.includes('channel_id')) db.exec('ALTER TABLE sales ADD COLUMN channel_id INTEGER');
   if (!salesCols.includes('customer_id')) db.exec('ALTER TABLE sales ADD COLUMN customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL');
   if (!salesCols.includes('billed_at')) {
@@ -313,6 +340,7 @@ function migrate() {
 
   const salesArchiveCols = db.prepare("PRAGMA table_info(sales_archive)").all().map((c) => c.name);
   if (!salesArchiveCols.includes('channel_id')) db.exec('ALTER TABLE sales_archive ADD COLUMN channel_id INTEGER');
+  if (!salesArchiveCols.includes('register_slot_id')) db.exec('ALTER TABLE sales_archive ADD COLUMN register_slot_id INTEGER');
 
   const productCols = db.prepare("PRAGMA table_info(products)").all().map((c) => c.name);
   if (!productCols.includes('image_url')) db.exec('ALTER TABLE products ADD COLUMN image_url TEXT');
@@ -324,6 +352,7 @@ function migrate() {
   if (!itemCols.includes('sent_to_kitchen')) db.exec('ALTER TABLE sale_items ADD COLUMN sent_to_kitchen INTEGER NOT NULL DEFAULT 0');
 
   db.exec('CREATE INDEX IF NOT EXISTS idx_sales_table ON sales(table_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_sales_register_slot ON sales(register_slot_id)');
 
   // Early installs of product_channel_prices had `price NOT NULL` and no
   // `available` column (price-override only, no per-channel availability).
@@ -346,6 +375,34 @@ function migrate() {
       CREATE INDEX IF NOT EXISTS idx_product_channel_prices_product ON product_channel_prices(product_id);
     `);
   }
+
+  // Early installs' CHECK constraint predates the 'waiter' role. SQLite can't
+  // alter a CHECK constraint in place, so rebuild the table — ids are
+  // preserved, so every other table's user_id foreign keys stay valid.
+  const usersTableSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get();
+  if (usersTableSql && !usersTableSql.sql.includes('waiter')) {
+    // Many tables (sales, shifts, stock_movements, ...) hold a foreign key
+    // into users(id) — with foreign_keys ON, SQLite refuses to DROP a table
+    // those rows still reference, even mid-rebuild. Turn enforcement off for
+    // just this rebuild; ids are preserved so those references stay valid
+    // once users is back.
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        pin_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('admin','manager','cashier','waiter')),
+        active INTEGER NOT NULL DEFAULT 1,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO users_new SELECT id, name, pin_hash, role, active, is_default, created_at FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
 }
 migrate();
 
@@ -353,25 +410,51 @@ function seed() {
   const userCount = db.prepare('SELECT COUNT(*) c FROM users').get().c;
   if (userCount === 0) {
     const insertUser = db.prepare(
-      'INSERT INTO users (name, pin_hash, role, is_default) VALUES (?, ?, ?, 1)'
+      'INSERT INTO users (name, pin_hash, role, active, is_default) VALUES (@name, @pin_hash, @role, @active, @is_default)'
     );
-    insertUser.run('Admin', bcrypt.hashSync('826497', 10), 'admin');
-    insertUser.run('Manager', bcrypt.hashSync('651248', 10), 'manager');
-    insertUser.run('Cashier', bcrypt.hashSync('123456', 10), 'cashier');
+    // Only the "1" slot of each role is a protected default (guarantees the
+    // role always has at least one account) — the rest are regular starter
+    // accounts, fully editable/removable once real staff are added.
+    [
+      { name: 'Admin', pin: '826497', role: 'admin', active: 1, is_default: 1 },
+      { name: 'Manager 1', pin: '000000', role: 'manager', active: 1, is_default: 1 },
+      { name: 'Manager 2', pin: '000001', role: 'manager', active: 0, is_default: 0 },
+      { name: 'Cashier 1', pin: '123456', role: 'cashier', active: 1, is_default: 1 },
+      { name: 'Cashier 2', pin: '567890', role: 'cashier', active: 0, is_default: 0 },
+      { name: 'Waiter 1', pin: '098765', role: 'waiter', active: 1, is_default: 1 },
+      { name: 'Waiter 2', pin: '987654', role: 'waiter', active: 0, is_default: 0 },
+      { name: 'Waiter 3', pin: '876543', role: 'waiter', active: 0, is_default: 0 },
+      { name: 'Waiter 4', pin: '765432', role: 'waiter', active: 0, is_default: 0 },
+    ].forEach((u) => insertUser.run({ name: u.name, pin_hash: bcrypt.hashSync(u.pin, 10), role: u.role, active: u.active, is_default: u.is_default }));
   }
-  // Installs from before the default Manager account existed won't have hit
-  // the userCount === 0 branch above — backfill it separately so upgrading
-  // doesn't require a fresh database.
+  // Installs from before the default Manager/Waiter account existed won't
+  // have hit the userCount === 0 branch above — backfill separately so
+  // upgrading doesn't require a fresh database. Only ever creates the
+  // account if missing; never resets an existing default account's PIN,
+  // since that's a real credential someone may have already changed.
   const defaultManager = db.prepare("SELECT id FROM users WHERE role = 'manager' AND is_default = 1").get();
   if (!defaultManager) {
     db.prepare('INSERT INTO users (name, pin_hash, role, is_default) VALUES (?, ?, ?, 1)')
-      .run('Manager', bcrypt.hashSync('651248', 10), 'manager');
+      .run('Manager 1', bcrypt.hashSync('000000', 10), 'manager');
+  }
+  const defaultWaiter = db.prepare("SELECT id FROM users WHERE role = 'waiter' AND is_default = 1").get();
+  if (!defaultWaiter) {
+    db.prepare('INSERT INTO users (name, pin_hash, role, is_default) VALUES (?, ?, ?, 1)')
+      .run('Waiter 1', bcrypt.hashSync('098765', 10), 'waiter');
   }
 
   const tableCount = db.prepare('SELECT COUNT(*) c FROM tables').get().c;
   if (tableCount === 0) {
     const insertTable = db.prepare('INSERT INTO tables (name) VALUES (?)');
     for (let i = 1; i <= 6; i++) insertTable.run(`Table ${i}`);
+  }
+
+  // Register "customer" slots — lets the Register distinguish concurrent
+  // walk-in orders the same way tables distinguish dine-in orders.
+  const registerSlotCount = db.prepare('SELECT COUNT(*) c FROM register_slots').get().c;
+  if (registerSlotCount === 0) {
+    const insertSlot = db.prepare('INSERT INTO register_slots (name) VALUES (?)');
+    for (let i = 1; i <= 10; i++) insertSlot.run(`Customer ${i}`);
   }
 
   // Order channels: where a sale actually came from (in-house vs. a delivery

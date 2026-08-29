@@ -235,6 +235,38 @@ function buildKitchenTicketEscPos(ticket, width = 32) {
   return out;
 }
 
+// Z-Reading: end-of-shift cash reconciliation, for the same thermal printer
+// receipts use — mirrors buildEscPosReceipt's store-header block so both
+// look consistent coming off the same till.
+function buildZReadingEscPos(data, width = 32) {
+  let out = '';
+  out += center(bold(data.storeName) + '\n');
+  if (data.storeAddress) out += center(data.storeAddress + '\n');
+  if (data.storePhone) out += center(data.storePhone + '\n');
+  if (data.storeTin) out += center(`TIN: ${data.storeTin}` + '\n');
+  out += line(width);
+  out += center(bold('Z-READING') + '\n');
+  out += line(width);
+  out += `Staff: ${data.userName}\n`;
+  out += `Opened: ${data.openedAt}\n`;
+  out += `Closed: ${data.closedAt || '-'}\n`;
+  out += line(width);
+  out += padRow('Orders', String(data.saleCount), width) + '\n';
+  out += padRow('Net Sales', data.netSales.toFixed(2), width) + '\n';
+  for (const [method, amount] of Object.entries(data.byMethod || {})) {
+    out += padRow(method.toUpperCase(), amount.toFixed(2), width) + '\n';
+  }
+  out += padRow('Refunds', '-' + data.refunds.toFixed(2), width) + '\n';
+  out += line(width);
+  out += padRow('Opening Cash', data.openingCash.toFixed(2), width) + '\n';
+  out += padRow('Expected Cash', data.expectedCash.toFixed(2), width) + '\n';
+  out += padRow('Counted Cash', (data.closingCash != null ? data.closingCash : 0).toFixed(2), width) + '\n';
+  out += bold(padRow('Difference', (data.cashDiff != null ? data.cashDiff : 0).toFixed(2), width)) + '\n';
+  out += line(width);
+  out += cut();
+  return out;
+}
+
 function buildKitchenTicketText(ticket, width = 32) {
   let out = '';
   out += 'KITCHEN ORDER\n';
@@ -253,5 +285,5 @@ function buildKitchenTicketText(ticket, width = 32) {
 
 module.exports = {
   buildEscPosReceipt, buildPlainTextReceipt, sendToNetworkPrinter,
-  buildKitchenTicketEscPos, buildKitchenTicketText,
+  buildKitchenTicketEscPos, buildKitchenTicketText, buildZReadingEscPos,
 };

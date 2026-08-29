@@ -12,7 +12,7 @@ router.get('/', (req, res) => {
   res.json(obj);
 });
 
-router.put('/', requireRole('admin', 'manager'), (req, res) => {
+router.put('/', requireRole('admin'), (req, res) => {
   // default_tax_rate is a fraction (0.12 = 12%) that now seeds every new
   // product's tax rate — a value typed as a whole-number percent (e.g. "12")
   // would silently give every future product a 1200% tax rate.

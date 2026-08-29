@@ -1,12 +1,12 @@
 const NAV_ITEMS = [
-  { key: 'pos', label: 'Register', icon: '🛒', roles: ['admin', 'manager', 'cashier'] },
-  { key: 'tables', label: 'Tables', icon: '🍽️', roles: ['admin', 'manager', 'cashier'] },
+  { key: 'pos', label: 'Register', icon: '🛒', roles: ['admin', 'manager', 'cashier', 'waiter'] },
+  { key: 'tables', label: 'Tables', icon: '🍽️', roles: ['admin', 'manager', 'cashier', 'waiter'] },
   { key: 'inventory', label: 'Inventory', icon: '📦', roles: ['admin', 'manager'] },
-  { key: 'customers', label: 'Customers', icon: '👥', roles: ['admin', 'manager'] },
+  { key: 'customers', label: 'Customers', icon: '👥', roles: ['admin', 'manager', 'waiter'] },
   { key: 'reports', label: 'Reports', icon: '📊', roles: ['admin', 'manager'] },
   { key: 'shift', label: 'Cash Drawer', icon: '🗄️', roles: ['admin', 'manager', 'cashier'] },
-  { key: 'users', label: 'Staff', icon: '🔑', roles: ['admin'] },
-  { key: 'settings', label: 'Settings', icon: '⚙️', roles: ['admin', 'manager'] },
+  { key: 'users', label: 'Staff', icon: '🔑', roles: ['admin', 'manager'] },
+  { key: 'settings', label: 'Settings', icon: '⚙️', roles: ['admin'] },
 ];
 
 const VIEWS = {
@@ -84,7 +84,6 @@ function renderShell() {
 async function logout() {
   await api.post('/api/auth/logout');
   window.APP_STATE.user = null;
-  window.APP_STATE.cart = [];
   renderLoginView();
 }
 

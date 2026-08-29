@@ -8,7 +8,9 @@ router.use(requireAuth);
 // Lists all active tables along with a summary of their current open order
 // (if any), so the Tables view can show Available vs Occupied at a glance.
 router.get('/', (req, res) => {
-  const tables = db.prepare('SELECT * FROM tables WHERE active = 1 ORDER BY name').all();
+  // Same length-then-name ordering as registers.js — plain alphabetical
+  // ORDER BY name would put "Table 10" before "Table 2".
+  const tables = db.prepare('SELECT * FROM tables WHERE active = 1 ORDER BY LENGTH(name), name').all();
   const openSales = db.prepare(`
     SELECT s.id, s.table_id, s.total, s.created_at, s.shift_id,
       (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id AND si.voided = 0) as item_count

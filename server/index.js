@@ -19,6 +19,7 @@ app.use(
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/products', require('./routes/products'));
 app.use('/api/tables', require('./routes/tables'));
+app.use('/api/registers', require('./routes/registers'));
 app.use('/api/categories', require('./routes/categories'));
 app.use('/api/sales', require('./routes/sales'));
 app.use('/api/shifts', require('./routes/shifts'));
@@ -38,7 +39,8 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
   const url = `http://localhost:${PORT}`;
   console.log(`\nClear Path POS is running at ${url}`);
-  console.log('Default logins -> Admin PIN: 826497  |  Manager PIN: 651248  |  Cashier PIN: 123456\n');
+  console.log('Default logins -> Admin: 826497  |  Manager 1: 000000 / Manager 2: 000001  |  Cashier 1: 123456 / Cashier 2: 567890  |  Waiter 1: 098765 / Waiter 2: 987654 / Waiter 3: 876543 / Waiter 4: 765432');
+  console.log('(Manager 2, Cashier 2, and Waiter 2-4 start inactive — activate them in Staff before use.)\n');
   if (process.env.NO_OPEN !== 'true') {
     try {
       require('open')(url);

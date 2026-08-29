@@ -22,6 +22,17 @@ const api = (() => {
   };
 })();
 
+// What a role can do on an order-taking screen (Register/Tables):
+// 'full' — cashier: build the order AND charge it.
+// 'order' — waiter: build the order (add items, send to kitchen), but never
+//   charge — only a cashier's own open shift can take payment.
+// 'view' — admin/manager: read-only, per their "not able to transact" access.
+function orderCapability(role) {
+  if (role === 'cashier') return 'full';
+  if (role === 'waiter') return 'order';
+  return 'view';
+}
+
 function ensureGlobalEmbers() {
   if (document.getElementById('global-embers')) return;
   const embersEl = document.createElement('div');

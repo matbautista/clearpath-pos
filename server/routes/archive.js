@@ -36,7 +36,9 @@ router.get('/years', (req, res) => {
   res.json({ currentYear, hotFromYear: currentYear - HOT_YEARS + 1, liveYears, archived });
 });
 
-router.post('/:year', (req, res) => {
+// Admin can view archived years/sales (router-level gate above) but
+// triggering a new archive run is a write action reserved for managers.
+router.post('/:year', requireRole('manager'), (req, res) => {
   const year = Number(req.params.year);
   if (!Number.isInteger(year) || year < 2000 || year > 9999) return res.status(400).json({ error: 'Invalid year' });
   if (!isEligibleYear(year)) return res.status(400).json({ error: `${year} is still within the ${HOT_YEARS}-year hot window and can't be archived yet.` });
@@ -69,8 +71,8 @@ router.post('/:year', (req, res) => {
   }
 
   const insertSaleArchive = db.prepare(`
-    INSERT INTO sales_archive (id, sale_number, user_id, customer_id, shift_id, channel_id, subtotal, discount_total, tax_total, vat_exempt_total, total, status, order_status, table_id, discount_type, discount_id_number, discount_holder_name, note, created_at, billed_at)
-    VALUES (@id, @sale_number, @user_id, @customer_id, @shift_id, @channel_id, @subtotal, @discount_total, @tax_total, @vat_exempt_total, @total, @status, @order_status, @table_id, @discount_type, @discount_id_number, @discount_holder_name, @note, @created_at, @billed_at)
+    INSERT INTO sales_archive (id, sale_number, user_id, customer_id, shift_id, channel_id, subtotal, discount_total, tax_total, vat_exempt_total, total, status, order_status, table_id, register_slot_id, discount_type, discount_id_number, discount_holder_name, note, created_at, billed_at)
+    VALUES (@id, @sale_number, @user_id, @customer_id, @shift_id, @channel_id, @subtotal, @discount_total, @tax_total, @vat_exempt_total, @total, @status, @order_status, @table_id, @register_slot_id, @discount_type, @discount_id_number, @discount_holder_name, @note, @created_at, @billed_at)
   `);
   const insertItemArchive = db.prepare(`
     INSERT INTO sale_items_archive (id, sale_id, product_id, name, price, qty, discount, tax_rate, tax_amount, vat_exempt_amount, sc_pwd_eligible, notes, sent_to_kitchen, line_total, voided, refunded_qty)
@@ -131,11 +133,12 @@ router.get('/:year/sales', (req, res) => {
 
   const total = db.prepare(`SELECT COUNT(*) as n FROM sales_archive WHERE billed_at BETWEEN ? AND ?`).get(from, to).n;
   const sales = db.prepare(`
-    SELECT sa.*, u.name as cashier_name, c.name as customer_name, t.name as table_name
+    SELECT sa.*, u.name as cashier_name, c.name as customer_name, COALESCE(t.name, rs.name) as table_name
     FROM sales_archive sa
     LEFT JOIN users u ON u.id = sa.user_id
     LEFT JOIN customers c ON c.id = sa.customer_id
     LEFT JOIN tables t ON t.id = sa.table_id
+    LEFT JOIN register_slots rs ON rs.id = sa.register_slot_id
     WHERE sa.billed_at BETWEEN ? AND ?
     ORDER BY sa.id DESC
     LIMIT ? OFFSET ?
@@ -146,11 +149,12 @@ router.get('/:year/sales', (req, res) => {
 
 router.get('/sales/:id', (req, res) => {
   const sale = db.prepare(`
-    SELECT sa.*, u.name as cashier_name, c.name as customer_name, t.name as table_name
+    SELECT sa.*, u.name as cashier_name, c.name as customer_name, COALESCE(t.name, rs.name) as table_name
     FROM sales_archive sa
     LEFT JOIN users u ON u.id = sa.user_id
     LEFT JOIN customers c ON c.id = sa.customer_id
     LEFT JOIN tables t ON t.id = sa.table_id
+    LEFT JOIN register_slots rs ON rs.id = sa.register_slot_id
     WHERE sa.id = ?
   `).get(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Not found in archive' });

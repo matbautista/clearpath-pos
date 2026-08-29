@@ -76,7 +76,20 @@ router.get('/low-stock', (req, res) => {
 });
 
 router.get('/barcode/:code', (req, res) => {
-  const product = db.prepare('SELECT * FROM products WHERE barcode = ? AND active = 1').get(req.params.code);
+  const { channel_id } = req.query;
+  // Same channel price-override join as GET / — without it, scanning a
+  // barcode for a product not already in the client's cached product list
+  // (e.g. added after the screen loaded) would add it at its walk-in price
+  // and ignore per-channel availability.
+  let sql = `SELECT p.*${channel_id ? ', COALESCE(cp.price, p.price) as price, COALESCE(cp.available, 1) as channel_available' : ''} FROM products p`;
+  const params = [];
+  if (channel_id) {
+    sql += ` LEFT JOIN product_channel_prices cp ON cp.product_id = p.id AND cp.channel_id = ?`;
+    params.push(channel_id);
+  }
+  sql += ` WHERE p.barcode = ? AND p.active = 1`;
+  params.push(req.params.code);
+  const product = db.prepare(sql).get(...params);
   if (!product) return res.status(404).json({ error: 'Product not found' });
   res.json(product);
 });

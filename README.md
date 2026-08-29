@@ -30,7 +30,7 @@ for day-to-day use — and you use it by opening a page in your browser.
   monthly), revenue by channel, and customer analytics (top spenders, most orders,
   most consistent regulars).
 - **Sales Archive**: once a calendar year is more than 2 years old, export it to a
-  JSON file and move it out of the live database from **Settings** — keeps Reports
+  JSON file and move it out of the live database from **Reports** — keeps Reports
   fast on a database that's been running for years, without deleting anything.
   Archived years stay browsable (and downloadable) from the same page.
 - **Cash Drawer / Z-Reading**: open a shift with a starting cash amount, and close it
@@ -42,14 +42,16 @@ for day-to-day use — and you use it by opening a page in your browser.
   receipt), then uncheck any line items that don't qualify. The discount is computed
   on the VAT-exclusive price per the standard BIR formula.
 - **Customers**: basic contact info, purchase history, loyalty points — managed from
-  admin/manager accounts; cashiers can still attach an existing customer to a sale
+  manager/waiter accounts; cashiers can still attach an existing customer to a sale
   at checkout for loyalty points.
-- **Staff accounts**: PIN login, three roles — cashier (Register, Tables, and their
-  own Cash Drawer), manager (+ inventory, customers, reports, refunds, settings),
-  admin (+ staff accounts). The default Admin, Manager, and Cashier accounts are
-  protected — they can't be deactivated or have their role changed (though their
-  PINs and names can still be changed) — add more staff accounts for real
-  day-to-day logins.
+- **Staff accounts**: PIN login, four roles — cashier (build and charge orders on
+  Register/Tables, own Cash Drawer), waiter (build/send orders on Register/Tables,
+  never charges, manages Customers), manager (view-only on Register/Tables/Cash
+  Drawer; full access to Inventory, Customers, and Reports, including refunds/voids;
+  can activate/deactivate staff), admin (full access to Inventory, Staff, and
+  Settings; view-only everywhere else). The default account for each role is
+  protected — it can't be deactivated or have its role changed (though its PIN and
+  name can still be changed) — add more staff accounts for real day-to-day logins.
 
 ## Requirements
 
@@ -63,19 +65,24 @@ npm start
 ```
 
 The first run creates a local SQLite database in `data/pos.db` (seeded with demo
-admin/manager/cashier logins and a handful of sample products) and opens your browser
-to `http://localhost:4000`. If your browser doesn't open automatically, open that
-address yourself.
+admin/manager/cashier/waiter logins and a handful of sample products) and opens your
+browser to `http://localhost:4000`. If your browser doesn't open automatically, open
+that address yourself.
 
 Default logins:
 - **Admin**, PIN `826497`
-- **Manager**, PIN `651248`
-- **Cashier**, PIN `123456`
+- **Manager 1**, PIN `000000`
+- **Cashier 1**, PIN `123456`
+- **Waiter 1**, PIN `098765`
 
-These three default accounts' roles are locked (an Admin account can't be turned into
-a Cashier, etc.), so there's always at least one login for each role — but you can
-still change their PINs and names, or add real staff, from **Staff** once logged in
-as Admin.
+Each role also seeds a couple of extra starter accounts (Manager 2, Cashier 2,
+Waiter 2-4) so you don't have to create logins from scratch for a small team — these
+start **inactive**; turn them on from **Staff** once logged in as Admin.
+
+Only the first account of each role (Admin, Manager 1, Cashier 1, Waiter 1) is a
+protected default — its role is locked (it can't be turned into a Cashier, etc.), so
+there's always at least one login for each role — but you can still change its PIN
+and name, or add real staff, from **Staff**.
 
 To stop the server, go back to the terminal window and press `Ctrl+C`.
 

@@ -5,20 +5,24 @@ async function renderTablesView(container) {
   container.innerHTML = '';
   const state = window.APP_STATE;
   const user = state.user;
-  state.shift = await api.get('/api/shifts/current');
-
-  // Only admins are exempt from having their own open cash drawer shift.
-  if (!state.shift && user.role !== 'admin') {
-    container.appendChild(el('div', { style: 'display:flex;align-items:center;justify-content:center;height:calc(100vh - 40px);' }, [
-      el('div', { class: 'card', style: 'max-width:420px;text-align:center;padding:32px;' }, [
-        el('div', { style: 'font-size:32px;margin-bottom:8px;' }, '🗄️'),
-        el('h2', { style: 'margin:0 0 8px;' }, 'No Shift Open'),
-        el('p', { style: 'color:var(--text-muted);font-size:14px;margin-bottom:20px;' },
-          'You need to open a cash drawer shift before starting or billing any table order.'),
-        el('button', { class: 'btn primary', onclick: () => navigate('shift') }, 'Open Shift'),
-      ]),
-    ]));
-    return;
+  // Only a cashier needs their own open cash drawer shift — the only role
+  // that actually charges anything here. Waiters have no cash-drawer access
+  // at all, so /api/shifts/current would 403 for them — skip it entirely
+  // for anyone but a cashier.
+  if (user.role === 'cashier') {
+    state.shift = await api.get('/api/shifts/current');
+    if (!state.shift) {
+      container.appendChild(el('div', { style: 'display:flex;align-items:center;justify-content:center;height:calc(100vh - 40px);' }, [
+        el('div', { class: 'card', style: 'max-width:420px;text-align:center;padding:32px;' }, [
+          el('div', { style: 'font-size:32px;margin-bottom:8px;' }, '🗄️'),
+          el('h2', { style: 'margin:0 0 8px;' }, 'No Shift Open'),
+          el('p', { style: 'color:var(--text-muted);font-size:14px;margin-bottom:20px;' },
+            'You need to open a cash drawer shift before starting or billing any table order.'),
+          el('button', { class: 'btn primary', onclick: () => navigate('shift') }, 'Open Shift'),
+        ]),
+      ]));
+      return;
+    }
   }
 
   const tables = await api.get('/api/tables');
@@ -100,6 +104,11 @@ function openManageTablesModal(onDone) {
 
 async function renderTableOrderScreen(container, table) {
   container.innerHTML = '';
+  // cashier can build the order and bill it; waiter can build it but never
+  // bill; admin/manager are read-only ("view only, not able to transact").
+  const capability = orderCapability(window.APP_STATE.user.role);
+  const canBuild = capability !== 'view';
+  const canCharge = capability === 'full';
   let openOrder = await api.get(`/api/sales/table/${table.id}/open`);
   let newItems = []; // this round, not sent yet: { product_id, name, price, tax_rate, qty, notes }
   let orderDiscount = { type: 'none', idNumber: '', holderName: '', isTakeout: false };
@@ -112,7 +121,11 @@ async function renderTableOrderScreen(container, table) {
   ]);
   let activeCategory = null;
 
-  const scanInput = el('input', { type: 'text', placeholder: 'Scan barcode or type SKU, then press Enter…' });
+  const scanInput = el('input', {
+    type: 'text',
+    placeholder: canBuild ? 'Scan barcode or type SKU, then press Enter…' : 'View only',
+    disabled: canBuild ? null : 'true',
+  });
   scanInput.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter' && scanInput.value.trim()) {
       await handleTableBarcode(scanInput.value.trim());
@@ -134,11 +147,12 @@ async function renderTableOrderScreen(container, table) {
     const items = tablesProducts.filter((p) => activeCategory === null || p.category_id === activeCategory);
     for (const p of items) {
       const outOfStock = p.track_stock && p.stock_qty <= 0;
+      const disabled = outOfStock || !canBuild;
       productGrid.appendChild(el('button', {
-        class: `product-tile ${outOfStock ? 'out' : ''}`,
+        class: `product-tile ${disabled ? 'out' : ''}`,
         style: productTileStyle(p),
-        disabled: outOfStock ? 'true' : null,
-        onclick: () => addNewItem(p),
+        disabled: disabled ? 'true' : null,
+        onclick: canBuild ? () => addNewItem(p) : null,
       }, [
         el('div', { class: 'name' }, p.name),
         el('div', {}, [
@@ -191,11 +205,17 @@ async function renderTableOrderScreen(container, table) {
     return { taxAmount, vatExemptAmount: 0, discount: 0, lineTotal: gross + taxAmount };
   }
 
+  // Sent-to-kitchen lines carry their eligible qty in `eligibility[item.id]`;
+  // this round's unsent drafts (no `.id` yet) carry it directly on
+  // `item.sc_pwd_eligible_qty` — same "missing means fully eligible,
+  // tracks qty" default either way.
+  function eligibleQtyFor(item) {
+    return item.id !== undefined ? (eligibility[item.id] ?? item.qty) : (item.sc_pwd_eligible_qty ?? item.qty);
+  }
+
   function computeBillLine(item) {
     const scPwdActive = orderDiscount.type !== 'none';
-    // A missing eligibility[item.id] means "fully eligible, tracks qty" (the
-    // dine-in default) — only an explicit number (incl. 0) overrides that.
-    const eligibleQty = scPwdActive ? Math.max(0, Math.min(eligibility[item.id] ?? item.qty, item.qty)) : 0;
+    const eligibleQty = scPwdActive ? Math.max(0, Math.min(eligibleQtyFor(item), item.qty)) : 0;
     const regularQty = item.qty - eligibleQty;
     const elig = computeSubtotal(item.price, eligibleQty, item.tax_rate, true);
     const reg = computeSubtotal(item.price, regularQty, item.tax_rate, false);
@@ -207,8 +227,7 @@ async function renderTableOrderScreen(container, table) {
     };
   }
 
-  function billTotals() {
-    const items = openOrder ? openOrder.items.filter((i) => !i.voided) : [];
+  function computeLineTotals(items) {
     let subtotal = 0, discountTotal = 0, taxTotal = 0, vatExemptTotal = 0;
     for (const i of items) {
       const c = computeBillLine(i);
@@ -219,6 +238,11 @@ async function renderTableOrderScreen(container, table) {
     }
     const total = subtotal - discountTotal - vatExemptTotal + taxTotal;
     return { subtotal, discountTotal, taxTotal, vatExemptTotal, total };
+  }
+
+  function billTotals() {
+    const items = openOrder ? openOrder.items.filter((i) => !i.voided) : [];
+    return computeLineTotals(items);
   }
 
   // Every eligible-for-discount item currently on the order — sent-to-kitchen
@@ -268,11 +292,13 @@ async function renderTableOrderScreen(container, table) {
         el('button', {
           class: `btn small ${discountLabel ? '' : 'ghost'}`,
           style: discountLabel ? 'background:#1ea672;border-color:#1ea672;color:#fff;' : '',
-          onclick: () => openTableScPwdModal(),
+          disabled: canBuild ? null : 'true',
+          onclick: canBuild ? () => openTableScPwdModal() : null,
         }, discountLabel ? `🎫 ${discountLabel}${orderDiscount.isTakeout ? ' 🥡' : ''}` : '🎫 SC/PWD'),
         el('button', {
           class: 'btn ghost small',
-          onclick: () => openTableCustomerPicker((c) => { orderCustomer = c; refreshOrderPanel(); }),
+          disabled: canBuild ? null : 'true',
+          onclick: canBuild ? () => openTableCustomerPicker((c) => { orderCustomer = c; refreshOrderPanel(); }) : null,
         }, orderCustomer ? orderCustomer.name : '+ Customer'),
       ]),
     ]);
@@ -315,12 +341,12 @@ async function renderTableOrderScreen(container, table) {
           ]),
           eligToggle,
           el('div', { class: 'qty-control' }, [
-            el('button', { onclick: () => editSentItem(line, line.qty - 1) }, '−'),
+            el('button', { disabled: canBuild ? null : 'true', onclick: canBuild ? () => editSentItem(line, line.qty - 1) : null }, '−'),
             el('span', {}, String(line.qty)),
-            el('button', { onclick: () => editSentItem(line, line.qty + 1) }, '+'),
+            el('button', { disabled: canBuild ? null : 'true', onclick: canBuild ? () => editSentItem(line, line.qty + 1) : null }, '+'),
           ]),
           el('div', { class: 'line-total' }, money(discountLabel ? computeBillLine(line).lineTotal : line.line_total)),
-          el('button', { class: 'remove-line', title: 'Remove item', onclick: () => editSentItem(line, 0) }, '✕'),
+          canBuild ? el('button', { class: 'remove-line', title: 'Remove item', onclick: () => editSentItem(line, 0) }, '✕') : null,
         ].filter(Boolean)));
       });
     }
@@ -362,7 +388,7 @@ async function renderTableOrderScreen(container, table) {
               el('span', {}, String(line.qty)),
               el('button', { onclick: () => { line.qty++; refreshOrderPanel(); } }, '+'),
             ]),
-            el('div', { class: 'line-total' }, money(line.price * line.qty)),
+            el('div', { class: 'line-total' }, money(discountLabel ? computeBillLine(line).lineTotal : line.price * line.qty)),
             el('button', { class: 'remove-line', onclick: () => { newItems.splice(idx, 1); refreshOrderPanel(); } }, '✕'),
           ].filter(Boolean)),
           notesInput,
@@ -371,29 +397,28 @@ async function renderTableOrderScreen(container, table) {
     }
 
     const totals = billTotals();
-    const newSubtotal = newItems.reduce((s, l) => s + l.price * l.qty, 0);
-    const newTax = newItems.reduce((s, l) => s + l.price * l.qty * l.tax_rate, 0);
-    const grandTotal = totals.total + newSubtotal + newTax;
+    const newTotals = computeLineTotals(newItems);
+    const grandTotal = totals.total + newTotals.total;
 
     const totalsEl = el('div', { class: 'cart-totals' }, [
       sentItems.length ? el('div', { class: 'totals-row' }, [el('span', {}, 'Sent to kitchen'), el('span', {}, money(totals.total))]) : null,
-      totals.discountTotal ? el('div', { class: 'totals-row' }, [el('span', {}, `${discountLabel} Discount (20%)`), el('span', {}, `-${money(totals.discountTotal)}`)]) : null,
-      totals.vatExemptTotal ? el('div', { class: 'totals-row' }, [el('span', {}, 'VAT-Exempt Sales'), el('span', {}, money(totals.vatExemptTotal))]) : null,
-      newItems.length ? el('div', { class: 'totals-row' }, [el('span', {}, 'This round'), el('span', {}, money(newSubtotal + newTax))]) : null,
+      (totals.discountTotal + newTotals.discountTotal) ? el('div', { class: 'totals-row' }, [el('span', {}, `${discountLabel} Discount (20%)`), el('span', {}, `-${money(totals.discountTotal + newTotals.discountTotal)}`)]) : null,
+      (totals.vatExemptTotal + newTotals.vatExemptTotal) ? el('div', { class: 'totals-row' }, [el('span', {}, 'VAT-Exempt Sales'), el('span', {}, money(totals.vatExemptTotal + newTotals.vatExemptTotal))]) : null,
+      newItems.length ? el('div', { class: 'totals-row' }, [el('span', {}, 'This round'), el('span', {}, money(newTotals.total))]) : null,
       el('div', { class: 'totals-row grand' }, [el('span', {}, 'Order Total'), el('span', {}, money(grandTotal))]),
     ].filter(Boolean));
 
     const actions = el('div', { class: 'cart-actions', style: 'flex-wrap:wrap;' }, [
       el('button', {
-        class: 'btn ghost', disabled: newItems.length === 0 ? 'true' : null,
+        class: 'btn ghost', disabled: (!canBuild || newItems.length === 0) ? 'true' : null,
         onclick: () => { newItems = []; refreshOrderPanel(); },
       }, 'Clear Round'),
       el('button', {
-        class: 'btn primary', disabled: newItems.length === 0 ? 'true' : null,
+        class: 'btn primary', disabled: (!canBuild || newItems.length === 0) ? 'true' : null,
         onclick: sendToKitchen,
       }, '🍳 Send to Kitchen'),
       el('button', {
-        class: 'btn success', disabled: (sentItems.length === 0 || newItems.length > 0) ? 'true' : null,
+        class: 'btn success', disabled: (!canCharge || sentItems.length === 0 || newItems.length > 0) ? 'true' : null,
         onclick: billOut,
       }, '💳 Bill Out'),
     ]);
@@ -552,9 +577,15 @@ async function renderTableOrderScreen(container, table) {
           el('button', { class: 'btn primary', onclick: () => {
             if (!idInput.value.trim() || !nameInput.value.trim()) { errorEl.textContent = 'ID number and name are required'; return; }
             const isTakeout = takeoutInput.checked;
+            const wasTakeout = orderDiscount.isTakeout;
             orderDiscount = { type, idNumber: idInput.value.trim(), holderName: nameInput.value.trim(), isTakeout };
             if (isTakeout) selectHighestPriceEligible();
-            else clearEligibilityOverrides();
+            // Only reverses takeout's restrictive all-zeros defaults when
+            // takeout is actually being turned off — reopening the modal to
+            // fix the ID number/name (takeout unchecked both before and
+            // after) must not wipe any per-item eligibility staff already
+            // set by hand.
+            else if (wasTakeout) clearEligibilityOverrides();
             document.body.removeChild(backdrop);
             refreshOrderPanel();
           } }, 'Apply'),

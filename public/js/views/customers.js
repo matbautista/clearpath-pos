@@ -2,6 +2,7 @@ async function renderCustomersView(container) {
   container.innerHTML = '';
   let customers = [];
   let query = '';
+  const canManage = ['manager', 'waiter'].includes(window.APP_STATE.user.role);
 
   async function load() {
     customers = query ? await api.get(`/api/customers?q=${encodeURIComponent(query)}`) : await api.get('/api/customers');
@@ -10,7 +11,7 @@ async function renderCustomersView(container) {
 
   const header = el('div', { class: 'view-header' }, [
     el('h2', {}, 'Customers'),
-    el('button', { class: 'btn primary', onclick: () => openCustomerModal(null, rerender) }, '+ Add Customer'),
+    canManage ? el('button', { class: 'btn primary', onclick: () => openCustomerModal(null, rerender) }, '+ Add Customer') : null,
   ]);
 
   const searchInput = el('input', { type: 'text', placeholder: 'Search customers…', style: 'max-width:320px;margin-bottom:14px;' });
@@ -33,17 +34,17 @@ async function renderCustomersView(container) {
         el('td', {}, String(c.loyalty_points)),
         el('td', {}, [
           el('button', { class: 'btn small', onclick: () => openCustomerHistoryModal(c) }, 'History'),
-          ' ',
-          el('button', { class: 'btn small', onclick: () => openCustomerModal(c, rerender) }, 'Edit'),
-          ' ',
-          el('button', { class: 'btn small danger', onclick: async () => {
+          canManage ? ' ' : null,
+          canManage ? el('button', { class: 'btn small', onclick: () => openCustomerModal(c, rerender) }, 'Edit') : null,
+          canManage ? ' ' : null,
+          canManage ? el('button', { class: 'btn small danger', onclick: async () => {
             if (confirm(`Delete ${c.name}? Their past orders stay in Reports but will no longer show this customer's name, and they'll drop out of the Top Spenders / Recurring / Most Consistent lists.`)) {
               try {
                 await api.del(`/api/customers/${c.id}`);
                 rerender();
               } catch (e) { toast(e.message, 'error'); }
             }
-          } }, 'Delete'),
+          } }, 'Delete') : null,
         ]),
       ]));
     });

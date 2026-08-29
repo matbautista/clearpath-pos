@@ -32,14 +32,14 @@ router.get('/:id', (req, res) => {
   res.json({ ...customer, purchases });
 });
 
-router.post('/', requireRole('admin', 'manager'), (req, res) => {
+router.post('/', requireRole('manager', 'waiter'), (req, res) => {
   const { name, phone, email, notes } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
   const info = db.prepare('INSERT INTO customers (name, phone, email, notes) VALUES (?, ?, ?, ?)').run(name, phone || null, email || null, notes || null);
   res.json(db.prepare('SELECT * FROM customers WHERE id = ?').get(info.lastInsertRowid));
 });
 
-router.put('/:id', requireRole('admin', 'manager'), (req, res) => {
+router.put('/:id', requireRole('manager', 'waiter'), (req, res) => {
   const existing = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Customer not found' });
   const fields = ['name', 'phone', 'email', 'notes', 'loyalty_points'];
@@ -50,7 +50,7 @@ router.put('/:id', requireRole('admin', 'manager'), (req, res) => {
   res.json(db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id));
 });
 
-router.delete('/:id', requireRole('admin', 'manager'), (req, res) => {
+router.delete('/:id', requireRole('manager', 'waiter'), (req, res) => {
   db.prepare('DELETE FROM customers WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });

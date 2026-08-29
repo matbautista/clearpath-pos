@@ -61,13 +61,12 @@ function getOpenShift(userId) {
   return db.prepare(`SELECT * FROM shifts WHERE user_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1`).get(userId);
 }
 
-// Every route that rings up or bills a sale requires the acting cashier or
-// manager to have their own open cash drawer shift first — sales aren't
-// attributable to a drawer otherwise, and end-of-day reconciliation would
-// have no home for them. Only admins are exempt; if one happens to have a
-// shift open anyway, the sale still attributes to it.
+// Only a cashier needs their own open cash drawer shift to transact — the
+// one role that actually charges anything. Admin/manager are view-only on
+// Register/Tables regardless, and waiters take orders but never charge, so a
+// shift would be meaningless for either of them.
 function requireShiftForRole(role) {
-  return role !== 'admin';
+  return role === 'cashier';
 }
 const NO_SHIFT_ERROR = 'Open a cash drawer shift before ringing up sales — go to Cash Drawer to start one.';
 
@@ -140,171 +139,84 @@ function recordPayments(saleId, payments) {
   return changeGiven;
 }
 
-// ---- Checkout (immediate, no table involved) ----
-router.post('/checkout', (req, res) => {
-  const {
-    items, payments, customer_id, note, channel_id,
-    discount_type, discount_id_number, discount_holder_name,
-  } = req.body;
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'At least one item is required' });
-  }
-  if (!Array.isArray(payments) || payments.length === 0) {
-    return res.status(400).json({ error: 'At least one payment is required' });
-  }
-  const scPwdType = ['senior', 'pwd'].includes(discount_type) ? discount_type : 'none';
-  if (scPwdType !== 'none' && (!discount_id_number || !discount_holder_name)) {
-    return res.status(400).json({ error: 'Senior Citizen / PWD ID number and holder name are required for this discount' });
-  }
-
-  const shift = getOpenShift(req.session.userId);
-  if (!shift && requireShiftForRole(req.session.role)) return res.status(400).json({ error: NO_SHIFT_ERROR });
-
-  const resolvedChannelId = resolveChannelId(channel_id);
-
-  const tx = db.transaction(() => {
-    const lineData = [];
-    for (const item of items) {
-      const product = item.product_id ? db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id) : null;
-      if (product && !channelAvailable(product.id, resolvedChannelId)) {
-        throw new Error(`${product.name} is not available on this order channel`);
-      }
-      const qty = Number(item.qty) || 1;
-      const override = channelPriceOverride(product?.id, resolvedChannelId);
-      const price = Number(override ?? item.price ?? product?.price ?? 0);
-      const taxRate = Number(item.tax_rate ?? product?.tax_rate ?? 0);
-      const manualDiscount = Number(item.discount) || 0;
-      const name = item.name || product?.name || 'Item';
-      const product_id = product ? product.id : null;
-
-      // A line can be partially SC/PWD-eligible (e.g. 2 of 3 units consumed
-      // by the cardholder, or takeout's single discounted unit within a
-      // bigger quantity) — split it into two sale_item rows, one per
-      // eligible/regular sub-quantity, each priced through the normal
-      // formula. manualDiscount isn't currently settable from any UI (always
-      // 0 in practice), so it's applied to the regular portion only.
-      const eligibleQty = scPwdType !== 'none' ? Math.max(0, Math.min(Number(item.sc_pwd_eligible_qty) || 0, qty)) : 0;
-      const regularQty = qty - eligibleQty;
-
-      if (eligibleQty > 0) {
-        const elig = computeSaleLine({ price, qty: eligibleQty, taxRate, manualDiscount: 0, scPwdEligible: true });
-        lineData.push({
-          product_id, name, price, qty: eligibleQty, discount: elig.discount, tax_rate: taxRate,
-          tax_amount: elig.taxAmount, vat_exempt_amount: elig.vatExemptAmount, sc_pwd_eligible: 1,
-          notes: item.notes || null, line_total: elig.lineTotal,
-        });
-      }
-      if (regularQty > 0) {
-        const reg = computeSaleLine({ price, qty: regularQty, taxRate, manualDiscount, scPwdEligible: false });
-        lineData.push({
-          product_id, name, price, qty: regularQty, discount: reg.discount, tax_rate: taxRate,
-          tax_amount: reg.taxAmount, vat_exempt_amount: reg.vatExemptAmount, sc_pwd_eligible: 0,
-          notes: item.notes || null, line_total: reg.lineTotal,
-        });
-      }
-    }
-
-    const total = lineData.reduce((s, l) => s + l.line_total, 0);
-    const paidTotal = payments.reduce((s, p) => s + Number(p.amount), 0);
-    if (paidTotal + 0.005 < total) {
-      throw new Error(`Payment total (${paidTotal.toFixed(2)}) is less than sale total (${total.toFixed(2)})`);
-    }
-
-    const saleNumber = nextSaleNumber();
-    const saleInfo = db.prepare(`
-      INSERT INTO sales (sale_number, user_id, customer_id, shift_id, channel_id, order_status, billed_at, discount_type, discount_id_number, discount_holder_name, note)
-      VALUES (?, ?, ?, ?, ?, 'billed', datetime('now'), ?, ?, ?, ?)
-    `).run(
-      saleNumber, req.session.userId, customer_id || null, shift ? shift.id : null, resolvedChannelId,
-      scPwdType, scPwdType !== 'none' ? discount_id_number : null, scPwdType !== 'none' ? discount_holder_name : null,
-      note || null
-    );
-
-    const saleId = saleInfo.lastInsertRowid;
-    const insertItem = db.prepare(`
-      INSERT INTO sale_items (sale_id, product_id, name, price, qty, discount, tax_rate, tax_amount, vat_exempt_amount, sc_pwd_eligible, notes, sent_to_kitchen, line_total)
-      VALUES (@sale_id, @product_id, @name, @price, @qty, @discount, @tax_rate, @tax_amount, @vat_exempt_amount, @sc_pwd_eligible, @notes, 1, @line_total)
-    `);
-    const decStock = db.prepare('UPDATE products SET stock_qty = stock_qty - ? WHERE id = ? AND track_stock = 1');
-    const insertMovement = db.prepare(`
-      INSERT INTO stock_movements (product_id, change_qty, reason, reference, user_id)
-      VALUES (?, ?, 'sale', ?, ?)
-    `);
-
-    for (const l of lineData) {
-      insertItem.run({ ...l, sale_id: saleId });
-      if (l.product_id) {
-        decStock.run(l.qty, l.product_id);
-        insertMovement.run(l.product_id, -l.qty, saleNumber, req.session.userId);
-      }
-    }
-
-    recomputeSaleTotals(saleId);
-    const changeGiven = recordPayments(saleId, payments);
-
-    if (customer_id) {
-      db.prepare('UPDATE customers SET loyalty_points = loyalty_points + ? WHERE id = ?').run(Math.floor(total / 100), customer_id);
-    }
-
-    return { saleId, saleNumber, changeGiven };
-  });
-
-  try {
-    const result = tx();
-    res.json(getSaleDetail(result.saleId));
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
 function getSaleDetail(id) {
   const sale = db.prepare(`
     SELECT s.*, u.name as cashier_name, c.name as customer_name, c.email as customer_email, c.phone as customer_phone,
-      t.name as table_name, ch.name as channel_name, ch.commission_rate as channel_commission_rate
+      t.name as table_name, rs.name as register_slot_name, ch.name as channel_name, ch.commission_rate as channel_commission_rate
     FROM sales s
     LEFT JOIN users u ON u.id = s.user_id
     LEFT JOIN customers c ON c.id = s.customer_id
     LEFT JOIN tables t ON t.id = s.table_id
+    LEFT JOIN register_slots rs ON rs.id = s.register_slot_id
     LEFT JOIN channels ch ON ch.id = s.channel_id
     WHERE s.id = ?
   `).get(id);
   if (!sale) return null;
-  sale.items = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(id);
+  // ORDER BY id (insertion order) matters here, not just for display — the
+  // client's sendOrder() matches these rows positionally against the
+  // newItems array it just posted to carry over each draft line's SC/PWD
+  // eligibility choice onto its real sale_item id.
+  sale.items = db.prepare('SELECT * FROM sale_items WHERE sale_id = ? ORDER BY id').all(id);
   sale.payments = db.prepare('SELECT * FROM payments WHERE sale_id = ?').all(id);
   return sale;
 }
 
 // ---- Table orders (restaurant flow: order now, bill later) ----
+// Also doubles as the Register's order flow for walk-in/counter sales — same
+// "send to kitchen, then bill" shape, just keyed by register_slot_id instead
+// of table_id (a walk-in order has no physical table, so staff pick a
+// "Customer" slot instead — see register_slots / server/routes/registers.js).
 
-// Sends a round of items to a table's tab — creates the open order if this
-// is the table's first round, otherwise appends to it. Items are priced
-// without any SC/PWD discount yet (that's only known at billing time) and
-// stock is deducted immediately, since the kitchen prepares on order, not
-// on payment.
-router.post('/orders', (req, res) => {
-  const { table_id, items, note } = req.body;
-  if (!table_id) return res.status(400).json({ error: 'table_id is required' });
+// Sends a round of items to a tab — creates the open order if this is the
+// first round for that table/slot, otherwise appends to the existing one.
+// Items are priced without any SC/PWD discount yet (that's only known at
+// billing time) and stock is deducted immediately, since the kitchen
+// prepares on order, not on payment.
+router.post('/orders', requireRole('cashier', 'waiter'), (req, res) => {
+  const { table_id, register_slot_id, channel_id, items, note } = req.body;
+  if (table_id && register_slot_id) return res.status(400).json({ error: 'An order belongs to either a table or a customer slot, not both' });
+  // Without one of the two, the sale would still be created (with both
+  // columns NULL) but invisible to GET /api/tables and GET /api/registers,
+  // which key off them — an orphaned open order nothing can find, send to
+  // the kitchen, or bill, despite already deducting stock.
+  if (!table_id && !register_slot_id) return res.status(400).json({ error: 'An order must belong to either a table or a customer slot' });
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'At least one item is required' });
   }
-  const table = db.prepare('SELECT * FROM tables WHERE id = ? AND active = 1').get(table_id);
-  if (!table) return res.status(404).json({ error: 'Table not found' });
+  let table = null;
+  if (table_id) {
+    table = db.prepare('SELECT * FROM tables WHERE id = ? AND active = 1').get(table_id);
+    if (!table) return res.status(404).json({ error: 'Table not found' });
+  }
+  let slot = null;
+  if (register_slot_id) {
+    slot = db.prepare('SELECT * FROM register_slots WHERE id = ? AND active = 1').get(register_slot_id);
+    if (!slot) return res.status(404).json({ error: 'Customer slot not found' });
+  }
 
   const shift = getOpenShift(req.session.userId);
   if (!shift && requireShiftForRole(req.session.role)) return res.status(400).json({ error: NO_SHIFT_ERROR });
 
   const tx = db.transaction(() => {
-    let sale = db.prepare(`SELECT * FROM sales WHERE table_id = ? AND order_status = 'open'`).get(table_id);
-    let saleId;
+    let sale = table_id
+      ? db.prepare(`SELECT * FROM sales WHERE table_id = ? AND order_status = 'open'`).get(table_id)
+      : register_slot_id
+        ? db.prepare(`SELECT * FROM sales WHERE register_slot_id = ? AND order_status = 'open'`).get(register_slot_id)
+        : null;
+
+    let saleId, saleNumber, resolvedChannelId;
     if (!sale) {
-      const saleNumber = nextSaleNumber();
+      resolvedChannelId = resolveChannelId(channel_id);
+      saleNumber = nextSaleNumber();
       const info = db.prepare(`
-        INSERT INTO sales (sale_number, user_id, table_id, shift_id, channel_id, order_status, note)
-        VALUES (?, ?, ?, ?, ?, 'open', ?)
-      `).run(saleNumber, req.session.userId, table_id, shift ? shift.id : null, resolveChannelId(null), note || null);
+        INSERT INTO sales (sale_number, user_id, table_id, register_slot_id, shift_id, channel_id, order_status, note)
+        VALUES (?, ?, ?, ?, ?, ?, 'open', ?)
+      `).run(saleNumber, req.session.userId, table_id || null, register_slot_id || null, shift ? shift.id : null, resolvedChannelId, note || null);
       saleId = info.lastInsertRowid;
     } else {
       saleId = sale.id;
+      saleNumber = sale.sale_number;
+      resolvedChannelId = sale.channel_id;
     }
 
     const insertItem = db.prepare(`
@@ -316,14 +228,19 @@ router.post('/orders', (req, res) => {
       INSERT INTO stock_movements (product_id, change_qty, reason, reference, user_id)
       VALUES (?, ?, 'sale', ?, ?)
     `);
+    const refLabel = table ? table.name : slot ? slot.name : 'Register';
 
     for (const item of items) {
       const product = item.product_id ? db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id) : null;
+      if (product && !channelAvailable(product.id, resolvedChannelId)) {
+        throw new Error(`${product.name} is not available on this order channel`);
+      }
       const qty = Number(item.qty) || 1;
       if (product && product.track_stock && product.stock_qty < qty) {
         throw new Error(`Only ${product.stock_qty} of ${product.name} left in stock`);
       }
-      const price = Number(item.price ?? product?.price ?? 0);
+      const override = channelPriceOverride(product?.id, resolvedChannelId);
+      const price = Number(override ?? item.price ?? product?.price ?? 0);
       const taxRate = Number(item.tax_rate ?? product?.tax_rate ?? 0);
       const taxAmount = price * qty * taxRate;
       insertItem.run({
@@ -334,7 +251,7 @@ router.post('/orders', (req, res) => {
       });
       if (product) {
         decStock.run(qty, product.id);
-        insertMovement.run(product.id, -qty, `${table.name} / ${sale ? sale.sale_number : ''}`, req.session.userId);
+        insertMovement.run(product.id, -qty, `${refLabel} / ${saleNumber}`, req.session.userId);
       }
     }
 
@@ -350,9 +267,16 @@ router.post('/orders', (req, res) => {
   }
 });
 
+// A customer slot's in-progress walk-in order (if any) — the Register's
+// counterpart to GET /table/:tableId/open.
+router.get('/register-slot/:slotId/open', (req, res) => {
+  const sale = db.prepare(`SELECT id FROM sales WHERE register_slot_id = ? AND order_status = 'open'`).get(req.params.slotId);
+  res.json(sale ? getSaleDetail(sale.id) : null);
+});
+
 // Marks any not-yet-sent items on an open order as sent, and prints/returns
 // a no-price kitchen ticket for just that new round.
-router.post('/:id/send-to-kitchen', async (req, res) => {
+router.post('/:id/send-to-kitchen', requireRole('cashier', 'waiter'), async (req, res) => {
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Order not found' });
   if (sale.order_status !== 'open') return res.status(400).json({ error: 'This order has already been billed' });
@@ -363,7 +287,7 @@ router.post('/:id/send-to-kitchen', async (req, res) => {
   db.prepare('UPDATE sale_items SET sent_to_kitchen = 1 WHERE sale_id = ? AND sent_to_kitchen = 0').run(sale.id);
 
   const ticket = {
-    tableName: sale.table_name || 'Order',
+    tableName: sale.table_name || sale.register_slot_name || 'Order',
     saleNumber: sale.sale_number,
     createdAt: new Date().toLocaleString(),
     items: newItems.map((i) => ({ name: i.name, qty: i.qty, notes: i.notes })),
@@ -385,9 +309,11 @@ router.post('/:id/send-to-kitchen', async (req, res) => {
 });
 
 // Edits a single line item on an OPEN order — including items already sent
-// to the kitchen. Admins can do this directly; anyone else must pass a valid
-// admin PIN in admin_pin. Use qty: 0 to remove/void the item entirely.
-router.post('/:id/items/:itemId/edit', (req, res) => {
+// to the kitchen. Cashier/waiter only (admin/manager are view-only on
+// Register/Tables); a valid admin PIN in admin_pin is always required, with
+// no bypass even for someone already logged in as admin — see
+// ensureAdminApproved. Use qty: 0 to remove/void the item entirely.
+router.post('/:id/items/:itemId/edit', requireRole('cashier', 'waiter'), (req, res) => {
   const { qty, admin_pin } = req.body;
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Order not found' });
@@ -447,7 +373,7 @@ router.post('/:id/items/:itemId/edit', (req, res) => {
 // Finalizes payment for an open table order: re-prices every line for the
 // SC/PWD discount now that eligibility is known, records payment, and
 // closes out the order (which frees up the table).
-router.post('/:id/bill', (req, res) => {
+router.post('/:id/bill', requireRole('cashier'), (req, res) => {
   const { payments, discount_type, discount_id_number, discount_holder_name, items, customer_id } = req.body;
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Order not found' });
@@ -541,7 +467,7 @@ router.post('/:id/bill', (req, res) => {
 
 // Finalized (billed) sales history — open table orders live in /api/tables
 // and are not "sales" yet, so they're excluded here.
-router.get('/', (req, res) => {
+router.get('/', requireRole('admin', 'manager'), (req, res) => {
   const { period, status } = req.query;
   const page = Math.max(1, Number(req.query.page) || 1);
   const pageSize = Math.min(200, Number(req.query.pageSize) || Number(req.query.limit) || 50);
@@ -556,10 +482,11 @@ router.get('/', (req, res) => {
 
   const total = db.prepare(`SELECT COUNT(*) as n FROM sales s ${where}`).get(...params).n;
   const sales = db.prepare(`
-    SELECT s.*, u.name as cashier_name, c.name as customer_name, t.name as table_name
+    SELECT s.*, u.name as cashier_name, c.name as customer_name, COALESCE(t.name, rs.name) as table_name
     FROM sales s LEFT JOIN users u ON u.id = s.user_id
     LEFT JOIN customers c ON c.id = s.customer_id
     LEFT JOIN tables t ON t.id = s.table_id
+    LEFT JOIN register_slots rs ON rs.id = s.register_slot_id
     ${where}
     ORDER BY s.id DESC
     LIMIT ? OFFSET ?
@@ -574,14 +501,14 @@ router.get('/table/:tableId/open', (req, res) => {
   res.json(sale ? getSaleDetail(sale.id) : null);
 });
 
-router.get('/:id', (req, res) => {
+router.get('/:id', requireRole('admin', 'manager'), (req, res) => {
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Sale not found' });
   res.json(sale);
 });
 
 // ---- Void ----
-router.post('/:id/void', requireRole('admin', 'manager'), (req, res) => {
+router.post('/:id/void', requireRole('manager'), (req, res) => {
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Sale not found' });
   const isOpenOrder = sale.order_status === 'open';
@@ -621,7 +548,7 @@ router.post('/:id/void', requireRole('admin', 'manager'), (req, res) => {
 });
 
 // ---- Refund (full or partial by line item) ----
-router.post('/:id/refund', requireRole('admin', 'manager'), (req, res) => {
+router.post('/:id/refund', requireRole('manager'), (req, res) => {
   const { items, reason, method } = req.body; // items: [{ sale_item_id, qty }]
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Sale not found' });
@@ -709,7 +636,7 @@ function buildReceiptPayload(sale) {
     createdAt: sale.created_at,
     cashierName: sale.cashier_name,
     customerName: sale.customer_name,
-    tableName: sale.table_name,
+    tableName: sale.table_name || sale.register_slot_name,
     items: sale.items.filter((i) => !i.voided).map((i) => ({
       name: i.name, qty: i.qty, price: i.price, lineTotal: i.line_total,
     })),

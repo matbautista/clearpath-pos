@@ -20,6 +20,10 @@ router.post('/login', (req, res) => {
   req.session.userId = user.id;
   req.session.role = user.role;
   req.session.name = user.name;
+  // Cashiers get an implicit record of their time on the clock via shifts
+  // (opened_at/closed_at) — admin, manager, and waiter never open one, so
+  // this is the only record of when they were actually using the POS.
+  db.prepare('INSERT INTO login_log (user_id, role) VALUES (?, ?)').run(user.id, user.role);
   res.json({ id: user.id, name: user.name, role: user.role });
 });
 
