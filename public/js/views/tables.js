@@ -42,9 +42,9 @@ async function renderTablesView(container) {
     const occupied = Boolean(t.open_sale);
     // shift_id is null either because the order's original shift closed
     // while it was still open (a real hand-off — see /shifts/:id/close), or
-    // because it was opened by an admin/manager, who aren't required to have
-    // one at all. Either way there's no shift claiming it yet, so the label
-    // stays neutral rather than assuming a hand-off happened.
+    // because it was opened by a waiter, who never has a shift at all.
+    // Either way there's no shift claiming it yet, so the label stays
+    // neutral rather than assuming a hand-off happened.
     const noShift = occupied && t.open_sale.shift_id === null;
     grid.appendChild(el('button', {
       class: 'product-tile',

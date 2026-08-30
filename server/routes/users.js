@@ -45,6 +45,12 @@ router.put('/:id', (req, res) => {
   if (req.session.role === 'manager' && (name !== undefined || role !== undefined || pin !== undefined)) {
     return res.status(403).json({ error: 'Managers can only activate or deactivate staff' });
   }
+  // Admin is the full-access role over Staff; Manager's activate/deactivate
+  // power is meant for cashiers/waiters (and other managers), not for
+  // reaching up and locking out an admin account.
+  if (req.session.role === 'manager' && existing.role === 'admin') {
+    return res.status(403).json({ error: 'Managers cannot modify admin accounts' });
+  }
 
   // The default Admin/Manager/Cashier/Waiter accounts are what guarantee at
   // least one login exists for each role — letting their role be reassigned
