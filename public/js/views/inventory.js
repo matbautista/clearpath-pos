@@ -148,11 +148,11 @@ async function openProductModal(product, categories, onDone) {
   const skuInput = el('input', { type: 'text', value: data.sku || '' });
   const barcodeInput = el('input', { type: 'text', value: data.barcode || '' });
   const imageUrlInput = el('input', { type: 'text', value: data.image_url || '', placeholder: '/assets/menu/dish.jpg or a full URL' });
-  const priceInput = el('input', { type: 'number', step: '0.01', value: String(data.price) });
-  const costInput = el('input', { type: 'number', step: '0.01', value: String(data.cost) });
+  const priceInput = el('input', { type: 'number', step: '0.01', min: '0', value: String(data.price) });
+  const costInput = el('input', { type: 'number', step: '0.01', min: '0', value: String(data.cost) });
   const taxInput = el('input', { type: 'number', step: '0.01', min: '0', max: '1', value: String(data.tax_rate) });
-  const stockInput = el('input', { type: 'number', step: '1', value: String(data.stock_qty) });
-  const lowStockInput = el('input', { type: 'number', step: '1', value: String(data.low_stock_threshold) });
+  const stockInput = el('input', { type: 'number', step: '1', min: '0', value: String(data.stock_qty) });
+  const lowStockInput = el('input', { type: 'number', step: '1', min: '0', value: String(data.low_stock_threshold) });
   const trackStockInput = el('input', { type: 'checkbox' });
   trackStockInput.checked = Boolean(data.track_stock);
   const colorInput = el('input', { type: 'color', value: data.color || '#4f7cff' });
@@ -181,6 +181,10 @@ async function openProductModal(product, categories, onDone) {
     if (!payload.name) { errorEl.textContent = 'Name is required'; return; }
     if (!(payload.tax_rate >= 0 && payload.tax_rate <= 1)) {
       errorEl.textContent = 'Tax rate must be a fraction between 0 and 1 (e.g. 0.12 for 12%)';
+      return;
+    }
+    if (payload.price < 0 || payload.cost < 0 || payload.stock_qty < 0 || payload.low_stock_threshold < 0) {
+      errorEl.textContent = 'Price, cost, and stock fields cannot be negative';
       return;
     }
     try {

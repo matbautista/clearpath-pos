@@ -13,6 +13,13 @@ function isValidTaxRate(tax_rate) {
   return Number.isFinite(n) && n >= 0 && n <= 1;
 }
 
+// price/cost/stock_qty/low_stock_threshold have no natural negative meaning —
+// unlike adjust-stock's change_qty, which is a signed delta.
+function isValidNonNegative(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0;
+}
+
 router.get('/', (req, res) => {
   const { q, category_id, active, channel_id } = req.query;
   // channel_id swaps in that channel's price override (e.g. FoodPanda/GrabFood
@@ -106,6 +113,12 @@ router.post('/', requireRole('admin', 'manager'), (req, res) => {
   if (tax_rate !== undefined && !isValidTaxRate(tax_rate)) {
     return res.status(400).json({ error: 'Tax rate must be a fraction between 0 and 1 (e.g. 0.12 for 12%)' });
   }
+  if (!isValidNonNegative(price)) return res.status(400).json({ error: 'Price must be a non-negative number' });
+  for (const [field, val] of [['cost', cost], ['stock_qty', stock_qty], ['low_stock_threshold', low_stock_threshold]]) {
+    if (val !== undefined && val !== null && val !== '' && !isValidNonNegative(val)) {
+      return res.status(400).json({ error: `${field} must be a non-negative number` });
+    }
+  }
   const stmt = db.prepare(`
     INSERT INTO products (sku, barcode, name, category_id, price, cost, tax_rate, stock_qty, low_stock_threshold, track_stock, color, image_url)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -128,6 +141,11 @@ router.put('/:id', requireRole('admin', 'manager'), (req, res) => {
   if (!existing) return res.status(404).json({ error: 'Product not found' });
   if (req.body.tax_rate !== undefined && !isValidTaxRate(req.body.tax_rate)) {
     return res.status(400).json({ error: 'Tax rate must be a fraction between 0 and 1 (e.g. 0.12 for 12%)' });
+  }
+  for (const field of ['price', 'cost', 'stock_qty', 'low_stock_threshold']) {
+    if (req.body[field] !== undefined && !isValidNonNegative(req.body[field])) {
+      return res.status(400).json({ error: `${field} must be a non-negative number` });
+    }
   }
   const fields = ['sku', 'barcode', 'name', 'category_id', 'price', 'cost', 'tax_rate', 'stock_qty', 'low_stock_threshold', 'track_stock', 'color', 'image_url', 'active'];
   const boolFields = new Set(['track_stock', 'active']);

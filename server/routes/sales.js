@@ -636,6 +636,7 @@ function buildReceiptPayload(sale) {
     createdAt: sale.created_at,
     cashierName: sale.cashier_name,
     customerName: sale.customer_name,
+    customerEmail: sale.customer_email,
     tableName: sale.table_name || sale.register_slot_name,
     items: sale.items.filter((i) => !i.voided).map((i) => ({
       name: i.name, qty: i.qty, price: i.price, lineTotal: i.line_total,
@@ -653,13 +654,17 @@ function buildReceiptPayload(sale) {
   };
 }
 
-router.get('/:id/receipt', (req, res) => {
+// Receipts carry customer PII (name, SC/PWD ID number) and full sale detail —
+// waiters never bill sales in the single-drawer model and have no reason to
+// pull an arbitrary sale's receipt, so they're excluded like everywhere else
+// receipt/sale detail is gated (canAccessShift's shifts.js counterpart).
+router.get('/:id/receipt', requireRole('cashier', 'manager', 'admin'), (req, res) => {
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Sale not found' });
   res.json(buildReceiptPayload(sale));
 });
 
-router.post('/:id/receipt/print', async (req, res) => {
+router.post('/:id/receipt/print', requireRole('cashier', 'manager', 'admin'), async (req, res) => {
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Sale not found' });
   const enabled = getSetting('thermal_printer_enabled', 'false') === 'true';
@@ -676,7 +681,7 @@ router.post('/:id/receipt/print', async (req, res) => {
   }
 });
 
-router.post('/:id/receipt/email', async (req, res) => {
+router.post('/:id/receipt/email', requireRole('cashier', 'manager', 'admin'), async (req, res) => {
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Sale not found' });
   const to = req.body.email || sale.customer_email;
