@@ -217,10 +217,12 @@ function buildPlainTextReceipt(receipt, width = 32) {
   return out;
 }
 
-// Kitchen tickets are intentionally price-free — just what to make.
-function buildKitchenTicketEscPos(ticket, width = 32) {
+// Kitchen tickets are intentionally price-free — just what to make. `label`
+// distinguishes the kitchen's copy from the table/customer's copy when both
+// are printed off the same order (see POST /:id/send-to-kitchen).
+function buildKitchenTicketEscPos(ticket, width = 32, label = 'KITCHEN ORDER') {
   let out = '';
-  out += center(bold('KITCHEN ORDER') + '\n');
+  out += center(bold(label) + '\n');
   out += center(bold(ticket.tableName) + '\n');
   out += line(width);
   out += `Order: ${ticket.saleNumber}\n`;
@@ -267,9 +269,9 @@ function buildZReadingEscPos(data, width = 32) {
   return out;
 }
 
-function buildKitchenTicketText(ticket, width = 32) {
+function buildKitchenTicketText(ticket, width = 32, label = 'KITCHEN ORDER') {
   let out = '';
-  out += 'KITCHEN ORDER\n';
+  out += `${label}\n`;
   out += `${ticket.tableName}\n`;
   out += line(width);
   out += `Order: ${ticket.saleNumber}\n`;

@@ -70,20 +70,23 @@ function requireShiftForRole(role) {
 }
 const NO_SHIFT_ERROR = 'Open a cash drawer shift before ringing up sales — go to Cash Drawer to start one.';
 
-// Editing a line item that's already been sent to the kitchen needs an
-// admin PIN typed in to confirm — every time, even if the person doing it is
-// already logged in as an admin. Stock's already moved and the kitchen may
-// already be cooking it, so this is a deliberate re-confirmation step, not
-// just a role check.
-function ensureAdminApproved(req, pin) {
-  const admins = db.prepare("SELECT * FROM users WHERE role = 'admin' AND active = 1").all();
-  const admin = pin ? admins.find((u) => bcrypt.compareSync(String(pin), u.pin_hash)) : null;
-  if (!admin) {
-    const err = new Error('Admin approval required to edit an order already sent to the kitchen');
+// Editing a line item that's already been sent to the kitchen needs a
+// manager PIN typed in to confirm — every time, even if the person doing it
+// is already logged in as a manager. Stock's already moved and the kitchen
+// may already be cooking it, so this is a deliberate re-confirmation step,
+// not just a role check. Manager-only, deliberately — admin is excluded here
+// even though admin's authority is a superset of manager's everywhere else
+// in the app; approving order changes on the floor is a manager
+// responsibility, not an admin one.
+function ensureManagerApproved(req, pin) {
+  const approvers = db.prepare("SELECT * FROM users WHERE role = 'manager' AND active = 1").all();
+  const approver = pin ? approvers.find((u) => bcrypt.compareSync(String(pin), u.pin_hash)) : null;
+  if (!approver) {
+    const err = new Error('Manager approval required to edit an order already sent to the kitchen');
     err.status = 403;
     throw err;
   }
-  return { name: admin.name };
+  return { name: approver.name };
 }
 
 // RA 9994 (Senior Citizens) / RA 10754 (PWD): 20% discount on the
@@ -283,7 +286,10 @@ router.get('/register-slot/:slotId/open', (req, res) => {
 });
 
 // Marks any not-yet-sent items on an open order as sent, and prints/returns
-// a no-price kitchen ticket for just that new round.
+// a no-price kitchen ticket for just that new round. Prints two physical
+// copies off the same kitchen printer — one for the kitchen, one for the
+// table/customer (e.g. so a waiter or the customer has a copy of what was
+// ordered) — labeled differently so staff can tell them apart.
 router.post('/:id/send-to-kitchen', requireRole('cashier', 'waiter'), async (req, res) => {
   const sale = getSaleDetail(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Order not found' });
@@ -304,23 +310,28 @@ router.post('/:id/send-to-kitchen', requireRole('cashier', 'waiter'), async (req
   const enabled = getSetting('kitchen_printer_enabled', 'false') === 'true';
   const target = getSetting('kitchen_printer_target', '');
   let printed = false;
-  let printError = null;
+  const printErrors = [];
   if (enabled && target) {
-    try {
-      await sendToNetworkPrinter(target, buildKitchenTicketEscPos(ticket));
-      printed = true;
-    } catch (e) {
-      printError = e.message;
+    const copies = [['KITCHEN COPY', 'kitchen'], ['TABLE COPY', 'table/customer']];
+    for (const [label, description] of copies) {
+      try {
+        await sendToNetworkPrinter(target, buildKitchenTicketEscPos(ticket, 32, label));
+      } catch (e) {
+        printErrors.push(`${description}: ${e.message}`);
+      }
     }
+    printed = printErrors.length === 0;
   }
+  const printError = printErrors.length ? printErrors.join('; ') : null;
   res.json({ ok: true, printed, printError, ticket, ticketText: buildKitchenTicketText(ticket), sale: getSaleDetail(sale.id) });
 });
 
 // Edits a single line item on an OPEN order — including items already sent
 // to the kitchen. Cashier/waiter only (admin/manager are view-only on
-// Register/Tables); a valid admin PIN in admin_pin is always required, with
-// no bypass even for someone already logged in as admin — see
-// ensureAdminApproved. Use qty: 0 to remove/void the item entirely.
+// Register/Tables); a valid manager PIN in admin_pin is always required,
+// with no bypass even for someone already logged in as manager (and no
+// admin bypass either — see ensureManagerApproved). Use qty: 0 to
+// remove/void the item entirely.
 router.post('/:id/items/:itemId/edit', requireRole('cashier', 'waiter'), (req, res) => {
   const { qty, admin_pin } = req.body;
   const sale = getSaleDetail(req.params.id);
@@ -339,7 +350,7 @@ router.post('/:id/items/:itemId/edit', requireRole('cashier', 'waiter'), (req, r
 
   let approver;
   try {
-    approver = ensureAdminApproved(req, admin_pin);
+    approver = ensureManagerApproved(req, admin_pin);
   } catch (e) {
     return res.status(e.status || 403).json({ error: e.message });
   }

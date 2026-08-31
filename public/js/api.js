@@ -75,13 +75,14 @@ function productTileStyle(p) {
   return `background:${p.color || 'var(--primary)'};`;
 }
 
-// Prompts for an admin PIN to approve a restricted action (e.g. editing an
+// Prompts for a manager PIN to approve a restricted action (e.g. editing an
 // order already sent to the kitchen). Resolves to the entered PIN string, or
-// null if the prompt was cancelled. The PIN itself is verified server-side.
-function promptAdminPin(message) {
+// null if the prompt was cancelled. The PIN itself is verified server-side,
+// against manager accounts only — admin cannot approve this.
+function promptApproverPin(message) {
   return new Promise((resolve) => {
     const backdrop = el('div', { class: 'modal-backdrop' });
-    const pinInput = el('input', { type: 'password', inputmode: 'numeric', placeholder: 'Admin PIN' });
+    const pinInput = el('input', { type: 'password', inputmode: 'numeric', placeholder: 'Manager PIN' });
     const errorEl = el('div', { class: 'login-error' }, '');
     let settled = false;
     function close(value) {
@@ -91,14 +92,14 @@ function promptAdminPin(message) {
       resolve(value);
     }
     const submit = () => {
-      if (!pinInput.value.trim()) { errorEl.textContent = 'Enter an admin PIN'; return; }
+      if (!pinInput.value.trim()) { errorEl.textContent = 'Enter a manager PIN'; return; }
       close(pinInput.value.trim());
     };
     pinInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
     const modal = el('div', { class: 'modal', style: 'width:340px;' }, [
-      el('h3', {}, 'Admin Approval Required'),
+      el('h3', {}, 'Manager Approval Required'),
       el('p', { style: 'font-size:12.5px;color:var(--text-muted);margin-top:-6px;' },
-        message || 'This action needs an admin to approve it.'),
+        message || 'This action needs a manager to approve it.'),
       el('div', { class: 'field', style: 'margin-top:10px;' }, [pinInput]),
       errorEl,
       el('div', { class: 'modal-actions' }, [

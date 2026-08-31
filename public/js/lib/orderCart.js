@@ -111,23 +111,24 @@ function createOrderCartLogic(ctx) {
 }
 
 // Edits or removes (qty 0) a line item already sent to the kitchen. Always
-// requires an admin PIN to confirm, even if the current user is already
-// logged in as admin — a deliberate re-confirmation step, since stock's
-// already moved and the kitchen may already be cooking it.
+// requires a manager PIN to confirm, even if the current user is already
+// logged in as manager — a deliberate re-confirmation step, since stock's
+// already moved and the kitchen may already be cooking it. Admin cannot
+// approve this — manager-only, by design.
 //
 // ctx.getSale()/ctx.setSale(sale) read/write the screen's local open-order
 // variable; ctx.eligibility is the screen's sale_item_id -> eligible qty map;
 // ctx.refresh() re-renders the order panel.
 function createEditSentItem(ctx) {
   return async function editSentItem(item, newQty) {
-    const adminPin = await promptAdminPin(
+    const approverPin = await promptApproverPin(
       newQty === 0
-        ? `Removing "${item.name}" from an order already sent to the kitchen needs admin approval.`
-        : `Changing "${item.name}" on an order already sent to the kitchen needs admin approval.`
+        ? `Removing "${item.name}" from an order already sent to the kitchen needs manager approval.`
+        : `Changing "${item.name}" on an order already sent to the kitchen needs manager approval.`
     );
-    if (adminPin === null) return;
+    if (approverPin === null) return;
     try {
-      const sale = await api.post(`/api/sales/${ctx.getSale().id}/items/${item.id}/edit`, { qty: newQty, admin_pin: adminPin });
+      const sale = await api.post(`/api/sales/${ctx.getSale().id}/items/${item.id}/edit`, { qty: newQty, admin_pin: approverPin });
       ctx.setSale(sale);
       if (ctx.eligibility[item.id] > newQty) ctx.eligibility[item.id] = newQty;
       toast(newQty === 0 ? 'Item removed' : 'Item updated', 'success');
