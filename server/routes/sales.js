@@ -216,7 +216,15 @@ router.post('/orders', requireRole('cashier', 'waiter'), (req, res) => {
     } else {
       saleId = sale.id;
       saleNumber = sale.sale_number;
-      resolvedChannelId = sale.channel_id;
+      // A later round can switch channels (e.g. Walk-in -> FoodPanda) before
+      // being sent — the client already re-prices/re-validates its draft
+      // against the new channel when that happens, so pricing/availability
+      // here must follow the channel actually being sent, not whatever the
+      // order was opened under.
+      resolvedChannelId = resolveChannelId(channel_id) || sale.channel_id;
+      if (resolvedChannelId !== sale.channel_id) {
+        db.prepare('UPDATE sales SET channel_id = ? WHERE id = ?').run(resolvedChannelId, saleId);
+      }
     }
 
     const insertItem = db.prepare(`

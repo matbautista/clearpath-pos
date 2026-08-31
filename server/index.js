@@ -1,17 +1,28 @@
 require('dotenv').config();
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const cookieSession = require('cookie-session');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// A missing SESSION_SECRET must never fall back to a fixed, publicly-known
+// value (cookie-session only signs cookies, it doesn't encrypt them — a
+// known secret would let anyone forge a session). Generate a random one for
+// this run instead; the cost is that existing sessions won't survive a
+// restart until .env sets SESSION_SECRET, same as the README instructs.
+if (!process.env.SESSION_SECRET) {
+  console.warn('SESSION_SECRET is not set in .env — generating a temporary one for this run (see README). Existing sessions will not survive a restart until it is set.');
+}
+const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
 // Raised from Express's 100kb default so a base64 receipt logo (settings) fits.
 app.use(express.json({ limit: '5mb' }));
 app.use(
   cookieSession({
     name: 'pos_session',
-    secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
+    secret: sessionSecret,
     maxAge: 12 * 60 * 60 * 1000,
   })
 );

@@ -40,6 +40,13 @@ router.put('/:id', (req, res) => {
   if (!existing) return res.status(404).json({ error: 'User not found' });
   const { name, role, active, pin } = req.body;
 
+  // Same self-lockout guard DELETE has — PUT is what the Staff UI actually
+  // calls to deactivate an account, so it needs it directly rather than
+  // relying on the (unreachable-in-the-UI) DELETE route alone.
+  if (Number(req.params.id) === req.session.userId && active !== undefined && !active) {
+    return res.status(400).json({ error: 'Cannot deactivate your own account' });
+  }
+
   // Manager can only toggle active — not name, role, or PIN. Reject the
   // whole request rather than silently applying a partial edit.
   if (req.session.role === 'manager' && (name !== undefined || role !== undefined || pin !== undefined)) {

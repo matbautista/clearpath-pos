@@ -20,6 +20,15 @@ function isValidNonNegative(v) {
   return Number.isFinite(n) && n >= 0;
 }
 
+// cost (COGS) is restricted to admin/manager — the same roles Inventory
+// (the only screen that shows it) is gated to. Cashiers/waiters only ever
+// need the rest of the product row for Register/Tables.
+function stripCostIfUnauthorized(req, product) {
+  if (!product || ['admin', 'manager'].includes(req.session.role)) return product;
+  const { cost, ...rest } = product;
+  return rest;
+}
+
 router.get('/', (req, res) => {
   const { q, category_id, active, channel_id } = req.query;
   // channel_id swaps in that channel's price override (e.g. FoodPanda/GrabFood
@@ -48,7 +57,7 @@ router.get('/', (req, res) => {
     params.push(active === 'true' ? 1 : 0);
   }
   sql += ` ORDER BY p.name`;
-  res.json(db.prepare(sql).all(...params));
+  res.json(db.prepare(sql).all(...params).map((p) => stripCostIfUnauthorized(req, p)));
 });
 
 router.get('/:id/channel-prices', (req, res) => {
@@ -79,7 +88,7 @@ router.get('/low-stock', (req, res) => {
     WHERE track_stock = 1 AND active = 1 AND stock_qty <= low_stock_threshold
     ORDER BY stock_qty ASC
   `).all();
-  res.json(rows);
+  res.json(rows.map((p) => stripCostIfUnauthorized(req, p)));
 });
 
 router.get('/barcode/:code', (req, res) => {
@@ -98,13 +107,13 @@ router.get('/barcode/:code', (req, res) => {
   params.push(req.params.code);
   const product = db.prepare(sql).get(...params);
   if (!product) return res.status(404).json({ error: 'Product not found' });
-  res.json(product);
+  res.json(stripCostIfUnauthorized(req, product));
 });
 
 router.get('/:id', (req, res) => {
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
   if (!product) return res.status(404).json({ error: 'Product not found' });
-  res.json(product);
+  res.json(stripCostIfUnauthorized(req, product));
 });
 
 router.post('/', requireRole('admin', 'manager'), (req, res) => {

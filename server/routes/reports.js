@@ -71,7 +71,7 @@ router.get('/hourly', (req, res) => {
   const { period = 'today', from: qFrom, to: qTo } = req.query;
   const { from, to } = dateRange(period, qFrom, qTo);
   const rows = db.prepare(`
-    SELECT strftime('%H', billed_at) as hour, COUNT(*) as orders, SUM(total) as revenue
+    SELECT strftime('%H', billed_at, 'localtime') as hour, COUNT(*) as orders, SUM(total) as revenue
     FROM sales
     WHERE billed_at BETWEEN ? AND ? AND status != 'voided'
     GROUP BY hour ORDER BY hour

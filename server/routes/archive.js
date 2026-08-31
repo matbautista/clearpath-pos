@@ -21,8 +21,11 @@ function isEligibleYear(year) {
 // order opened one day and paid the next lands in the right year/period.
 router.get('/years', (req, res) => {
   const currentYear = new Date().getFullYear();
+  // billed_at is stored in UTC (datetime('now')) — 'localtime' converts it
+  // back to this machine's timezone before extracting the year, so a sale
+  // billed just after local midnight isn't misfiled under the prior UTC year.
   const liveYears = db.prepare(`
-    SELECT strftime('%Y', billed_at) as year, COUNT(*) as n
+    SELECT strftime('%Y', billed_at, 'localtime') as year, COUNT(*) as n
     FROM sales WHERE order_status = 'billed'
     GROUP BY year ORDER BY year DESC
   `).all().map((r) => ({ year: Number(r.year), count: r.n, eligible: isEligibleYear(Number(r.year)) }));
@@ -44,9 +47,10 @@ router.post('/:year', requireRole('manager'), (req, res) => {
   if (!isEligibleYear(year)) return res.status(400).json({ error: `${year} is still within the ${HOT_YEARS}-year hot window and can't be archived yet.` });
   if (db.prepare('SELECT 1 FROM archive_runs WHERE year = ?').get(year)) return res.status(400).json({ error: `${year} has already been archived.` });
 
-  const from = `${year}-01-01 00:00:00`;
-  const to = `${year}-12-31 23:59:59`;
-  const sales = db.prepare(`SELECT * FROM sales WHERE order_status = 'billed' AND billed_at BETWEEN ? AND ?`).all(from, to);
+  // billed_at is stored in UTC — match it against the local calendar year
+  // (same as GET /years) rather than a UTC-literal date range, so early
+  // local-morning sales aren't left behind in the prior year's archive.
+  const sales = db.prepare(`SELECT * FROM sales WHERE order_status = 'billed' AND strftime('%Y', billed_at, 'localtime') = ?`).all(String(year));
   if (sales.length === 0) return res.status(400).json({ error: `No records found for ${year}.` });
 
   const saleIds = sales.map((s) => s.id);
@@ -125,13 +129,14 @@ router.get('/:year/download', (req, res) => {
 });
 
 router.get('/:year/sales', (req, res) => {
-  const year = Number(req.params.year);
+  const year = String(Number(req.params.year));
   const page = Math.max(1, Number(req.query.page) || 1);
   const pageSize = Math.min(200, Number(req.query.pageSize) || 50);
-  const from = `${year}-01-01 00:00:00`;
-  const to = `${year}-12-31 23:59:59`;
 
-  const total = db.prepare(`SELECT COUNT(*) as n FROM sales_archive WHERE billed_at BETWEEN ? AND ?`).get(from, to).n;
+  // Match by local calendar year (same as the archive run that filed these
+  // rows under `year` in the first place — see POST /:year above), not a
+  // UTC-literal date range.
+  const total = db.prepare(`SELECT COUNT(*) as n FROM sales_archive WHERE strftime('%Y', billed_at, 'localtime') = ?`).get(year).n;
   const sales = db.prepare(`
     SELECT sa.*, u.name as cashier_name, c.name as customer_name, COALESCE(t.name, rs.name) as table_name
     FROM sales_archive sa
@@ -139,10 +144,10 @@ router.get('/:year/sales', (req, res) => {
     LEFT JOIN customers c ON c.id = sa.customer_id
     LEFT JOIN tables t ON t.id = sa.table_id
     LEFT JOIN register_slots rs ON rs.id = sa.register_slot_id
-    WHERE sa.billed_at BETWEEN ? AND ?
+    WHERE strftime('%Y', sa.billed_at, 'localtime') = ?
     ORDER BY sa.id DESC
     LIMIT ? OFFSET ?
-  `).all(from, to, pageSize, (page - 1) * pageSize);
+  `).all(year, pageSize, (page - 1) * pageSize);
 
   res.json({ sales, total, page, pageSize });
 });

@@ -250,96 +250,14 @@ async function renderRegisterOrderScreen(container, slot) {
     refreshOrderPanel();
   }
 
-  // Mirrors computeSaleLine() in server/routes/sales.js for a live preview. A
-  // line can be partially eligible (e.g. 2 of 3 units consumed by the
-  // cardholder) — split it into an eligible sub-quantity and a regular
-  // sub-quantity and sum their results.
-  function computeSubtotal(price, qty, taxRate, scPwdEligible) {
-    const gross = price * qty;
-    if (scPwdEligible) {
-      const vatExclusive = gross / (1 + taxRate);
-      const vatExemptAmount = gross - vatExclusive;
-      const scPwdDiscount = vatExclusive * 0.2;
-      return { taxAmount: 0, vatExemptAmount, discount: scPwdDiscount, lineTotal: vatExclusive - scPwdDiscount };
-    }
-    const taxAmount = gross * taxRate;
-    return { taxAmount, vatExemptAmount: 0, discount: 0, lineTotal: gross + taxAmount };
-  }
-
-  // Sent-to-kitchen lines carry their eligible qty in `eligibility[item.id]`;
-  // this round's unsent drafts (no `.id` yet) carry it directly on
-  // `item.sc_pwd_eligible_qty` — same "missing means fully eligible,
-  // tracks qty" default either way.
-  function eligibleQtyFor(item) {
-    return item.id !== undefined ? (eligibility[item.id] ?? item.qty) : (item.sc_pwd_eligible_qty ?? item.qty);
-  }
-
-  function computeBillLine(item) {
-    const scPwdActive = orderDiscount.type !== 'none';
-    const eligibleQty = scPwdActive ? Math.max(0, Math.min(eligibleQtyFor(item), item.qty)) : 0;
-    const regularQty = item.qty - eligibleQty;
-    const elig = computeSubtotal(item.price, eligibleQty, item.tax_rate, true);
-    const reg = computeSubtotal(item.price, regularQty, item.tax_rate, false);
-    return {
-      taxAmount: elig.taxAmount + reg.taxAmount,
-      vatExemptAmount: elig.vatExemptAmount + reg.vatExemptAmount,
-      discount: elig.discount + reg.discount,
-      lineTotal: elig.lineTotal + reg.lineTotal,
-    };
-  }
-
-  function computeLineTotals(items) {
-    let subtotal = 0, discountTotal = 0, taxTotal = 0, vatExemptTotal = 0;
-    for (const i of items) {
-      const c = computeBillLine(i);
-      subtotal += i.price * i.qty;
-      discountTotal += c.discount;
-      taxTotal += c.taxAmount;
-      vatExemptTotal += c.vatExemptAmount;
-    }
-    const total = subtotal - discountTotal - vatExemptTotal + taxTotal;
-    return { subtotal, discountTotal, taxTotal, vatExemptTotal, total };
-  }
-
-  function billTotals() {
-    const items = openOrder ? openOrder.items.filter((i) => !i.voided) : [];
-    return computeLineTotals(items);
-  }
-
-  // Every eligible-for-discount item currently on the order — sent-to-kitchen
-  // lines (keyed by sale_item id in `eligibility`) plus this round's unsent
-  // drafts (keyed on the line object itself).
-  function allOrderLines() {
-    return [...(openOrder ? openOrder.items.filter((i) => !i.voided) : []), ...newItems];
-  }
-
-  // Defaults eligibility for takeout: only ONE unit of the single
-  // highest-priced (per-unit) item across the whole order — sent or not —
-  // starts out marked, everything else 0, since staff can't know which item
-  // the PWD/senior will actually eat. This is only a starting point, not an
-  // ongoing constraint — staff can still check any other dish/quantity
-  // afterward.
-  function selectHighestPriceEligible() {
-    for (const i of (openOrder ? openOrder.items.filter((i) => !i.voided) : [])) eligibility[i.id] = 0;
-    for (const l of newItems) l.sc_pwd_eligible_qty = 0;
-    const lines = allOrderLines();
-    if (lines.length === 0) return;
-    let top = lines[0];
-    for (const l of lines) if (l.price > top.price) top = l;
-    const qty = Math.min(1, top.qty);
-    if (top.id !== undefined) eligibility[top.id] = qty;
-    else top.sc_pwd_eligible_qty = qty;
-  }
-
-  // Reverses selectHighestPriceEligible(): a missing eligibility[id] /
-  // undefined sc_pwd_eligible_qty reads as "fully eligible, tracks qty"
-  // everywhere it's consumed, so un-checking takeout after it was applied
-  // must clear the restrictive zeros it left behind rather than leaving most
-  // of the order stuck ineligible.
-  function clearEligibilityOverrides() {
-    for (const i of (openOrder ? openOrder.items.filter((i) => !i.voided) : [])) delete eligibility[i.id];
-    for (const l of newItems) l.sc_pwd_eligible_qty = undefined;
-  }
+  // Shared with tables.js — see public/js/lib/orderCart.js.
+  const cart = createOrderCartLogic({
+    getOpenOrder: () => openOrder,
+    getNewItems: () => newItems,
+    getOrderDiscount: () => orderDiscount,
+    eligibility,
+  });
+  const { computeBillLine, computeLineTotals, billTotals, selectHighestPriceEligible, clearEligibilityOverrides } = cart;
 
   const orderPanelRef = el('div', { class: 'pos-right' });
 
@@ -489,25 +407,13 @@ async function renderRegisterOrderScreen(container, slot) {
     orderPanelRef.appendChild(actions);
   }
 
-  // Edits or removes (qty 0) a line item already sent to the kitchen.
-  // Always requires an admin PIN to confirm, even if the current user is
-  // already logged in as admin — this is a deliberate re-confirmation step.
-  async function editSentItem(item, newQty) {
-    const adminPin = await promptAdminPin(
-      newQty === 0
-        ? `Removing "${item.name}" from an order already sent to the kitchen needs admin approval.`
-        : `Changing "${item.name}" on an order already sent to the kitchen needs admin approval.`
-    );
-    if (adminPin === null) return;
-    try {
-      openOrder = await api.post(`/api/sales/${openOrder.id}/items/${item.id}/edit`, { qty: newQty, admin_pin: adminPin });
-      if (eligibility[item.id] > newQty) eligibility[item.id] = newQty;
-      toast(newQty === 0 ? 'Item removed' : 'Item updated', 'success');
-      refreshOrderPanel();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  }
+  // Shared with tables.js — see public/js/lib/orderCart.js.
+  const editSentItem = createEditSentItem({
+    getSale: () => openOrder,
+    setSale: (s) => { openOrder = s; },
+    eligibility,
+    refresh: refreshOrderPanel,
+  });
 
   async function sendOrder() {
     if (newItems.length === 0) return;
@@ -568,41 +474,6 @@ async function renderRegisterOrderScreen(container, slot) {
     });
   }
 
-  // Local to this order — deliberately not window.APP_STATE.customer, which
-  // would bleed across screens/orders.
-  function openCustomerPicker(onSelect) {
-    let results = [];
-    const backdrop = el('div', { class: 'modal-backdrop' });
-    const searchInput = el('input', { type: 'text', placeholder: 'Search customer by name or phone…' });
-    const listEl = el('div', { style: 'margin-top:10px;max-height:240px;overflow-y:auto;' });
-
-    async function search() {
-      results = searchInput.value ? await api.get(`/api/customers?q=${encodeURIComponent(searchInput.value)}`) : await api.get('/api/customers');
-      listEl.innerHTML = '';
-      results.forEach((c) => {
-        listEl.appendChild(el('button', { class: 'staff-btn', style: 'width:100%;margin-bottom:6px;', onclick: () => {
-          document.body.removeChild(backdrop);
-          onSelect(c);
-        } }, [c.name, el('span', { class: 'staff-role' }, c.phone || c.email || '')]));
-      });
-    }
-    searchInput.addEventListener('input', search);
-    search();
-
-    const modal = el('div', { class: 'modal' }, [
-      el('h3', {}, 'Attach Customer'),
-      searchInput,
-      listEl,
-      el('div', { class: 'modal-actions' }, [
-        el('button', { class: 'btn ghost', onclick: () => { document.body.removeChild(backdrop); onSelect(null); } }, 'No customer'),
-        el('button', { class: 'btn', onclick: () => document.body.removeChild(backdrop) }, 'Cancel'),
-      ]),
-    ]);
-    backdrop.appendChild(modal);
-    document.body.appendChild(backdrop);
-    searchInput.focus();
-  }
-
   function openChannelPicker(onDone) {
     const backdrop = el('div', { class: 'modal-backdrop' });
     const listEl = el('div', { style: 'margin-top:10px;max-height:280px;overflow-y:auto;' });
@@ -627,59 +498,15 @@ async function renderRegisterOrderScreen(container, slot) {
     document.body.appendChild(backdrop);
   }
 
+  // Shared with tables.js — see public/js/lib/orderCart.js.
   function openScPwdModal() {
-    let type = orderDiscount.type !== 'none' ? orderDiscount.type : 'senior';
-    const backdrop = el('div', { class: 'modal-backdrop' });
-    const idInput = el('input', { type: 'text', value: orderDiscount.idNumber || '', placeholder: 'e.g. OSCA/PWD ID number' });
-    const nameInput = el('input', { type: 'text', value: orderDiscount.holderName || '', placeholder: 'Full name on the ID' });
-    const takeoutInput = el('input', { type: 'checkbox' });
-    takeoutInput.checked = Boolean(orderDiscount.isTakeout);
-    const errorEl = el('div', { class: 'login-error' }, '');
-
-    function renderModal() {
-      backdrop.innerHTML = '';
-      const modal = el('div', { class: 'modal' }, [
-        el('h3', {}, 'Senior Citizen / PWD Discount'),
-        el('p', { style: 'font-size:12.5px;color:var(--text-muted);margin-top:-6px;' }, '20% discount + VAT exemption per RA 9994 / RA 10754. Check off exactly which items the cardholder is actually consuming — uncheck anything a companion is eating instead.'),
-        el('div', { class: 'tender-methods', style: 'grid-template-columns:repeat(2,1fr);' }, [
-          el('button', { class: type === 'senior' ? 'active' : '', onclick: () => { type = 'senior'; renderModal(); } }, 'Senior Citizen'),
-          el('button', { class: type === 'pwd' ? 'active' : '', onclick: () => { type = 'pwd'; renderModal(); } }, 'PWD'),
-        ]),
-        el('div', { class: 'field', style: 'margin-top:10px;' }, [el('label', {}, `${type === 'senior' ? 'OSCA' : 'PWD'} ID Number`), idInput]),
-        el('div', { class: 'field' }, [el('label', {}, 'Cardholder Name'), nameInput]),
-        el('label', { style: 'display:flex;align-items:center;gap:8px;font-size:13px;margin-top:4px;' }, [
-          takeoutInput,
-          '🥡 Takeout — we can\'t know what the cardholder eats, so only the single most expensive item qualifies',
-        ]),
-        errorEl,
-        el('div', { class: 'modal-actions' }, [
-          orderDiscount.type !== 'none' ? el('button', { class: 'btn ghost', onclick: () => {
-            orderDiscount = { type: 'none', idNumber: '', holderName: '', isTakeout: false };
-            document.body.removeChild(backdrop);
-            refreshOrderPanel();
-          } }, 'Remove Discount') : null,
-          el('button', { class: 'btn', onclick: () => document.body.removeChild(backdrop) }, 'Cancel'),
-          el('button', { class: 'btn primary', onclick: () => {
-            if (!idInput.value.trim() || !nameInput.value.trim()) { errorEl.textContent = 'ID number and name are required'; return; }
-            const isTakeout = takeoutInput.checked;
-            const wasTakeout = orderDiscount.isTakeout;
-            orderDiscount = { type, idNumber: idInput.value.trim(), holderName: nameInput.value.trim(), isTakeout };
-            if (isTakeout) selectHighestPriceEligible();
-            // Only reverses takeout's restrictive all-zeros defaults when
-            // takeout is actually being turned off — reopening the modal to
-            // fix the ID number/name (takeout unchecked both before and
-            // after) must not wipe any per-item eligibility staff already
-            // set by hand.
-            else if (wasTakeout) clearEligibilityOverrides();
-            document.body.removeChild(backdrop);
-            refreshOrderPanel();
-          } }, 'Apply'),
-        ].filter(Boolean)),
-      ]);
-      backdrop.appendChild(modal);
-    }
-    renderModal();
-    document.body.appendChild(backdrop);
+    openScPwdDiscountModal({
+      getOrderDiscount: () => orderDiscount,
+      setOrderDiscount: (d) => { orderDiscount = d; },
+      selectHighestPriceEligible,
+      clearEligibilityOverrides,
+      refresh: refreshOrderPanel,
+    });
   }
 
   refreshOrderPanel();
