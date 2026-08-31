@@ -177,6 +177,21 @@ with a popup showing the address to use on the tablet. It's safe to re-run if
 anything fails partway (e.g. no internet mid-download). `Show-Tablet-Address.bat`
 in the same folder can be re-run any time later to look up that address again.
 
+### Updating to a newer version
+
+Double-click `Update-ClearPathPOS.bat` in `scripts/windows/` (no Administrator
+prompt needed for this one). It pulls the latest code from GitHub, reinstalls
+dependencies, and restarts the app. `data/pos.db` and `.env` are never touched —
+the first run also takes a quick backup copy of `data/pos.db` into
+`data/backups/` before doing anything else, just in case.
+
+If this install was set up by copying the folder by hand rather than with
+`git clone`, the first update run turns it into a proper git checkout of the
+same GitHub repo (installing Git for Windows automatically if it's missing) so
+this and future updates are simple from then on. Only files tracked in the
+repo get overwritten — `data/`, `.env`, and `node_modules/` are all gitignored
+and are left exactly as they are.
+
 ### Manual setup
 
 The app itself needs nothing Windows-specific — `npm install && npm start` works

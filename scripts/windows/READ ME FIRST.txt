@@ -38,3 +38,12 @@ The setup window will show a message in red and a popup explaining what
 happened. It's safe to just run "Install-ClearPathPOS.bat" again - it
 won't break anything by running twice. If it keeps failing, note down
 the red message and send it to whoever set this up for you.
+
+GETTING UPDATES LATER
+----------------------
+When there's a newer version of the app to install, double-click
+"Update-ClearPathPOS.bat" in this same folder. It downloads the latest
+version and restarts the app automatically - no Administrator prompt
+needed for this one. Your sales history and settings are never touched
+by it. Safe to run any time, and safe to run again if it fails partway
+(e.g. no internet).
