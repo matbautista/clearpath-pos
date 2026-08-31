@@ -192,6 +192,40 @@ this and future updates are simple from then on. Only files tracked in the
 repo get overwritten — `data/`, `.env`, and `node_modules/` are all gitignored
 and are left exactly as they are.
 
+### Giving the tablet a permanent address
+
+By default, a router can hand the desktop a different local IP after a reboot or
+power outage — which silently breaks whatever `http://<ip>:4000` address the
+tablet has bookmarked. A **DHCP reservation** fixes this: it pins the desktop to
+the same IP forever, while still technically being assigned by DHCP (so nothing
+needs to be configured on the desktop itself).
+
+1. **Find the desktop's MAC address.** On the Windows PC: Command Prompt →
+   `ipconfig /all` → look under the active adapter (Wi-Fi or Ethernet) for
+   "Physical Address."
+2. **Log into your router's admin page.** Usually `http://192.168.1.1` or
+   `http://192.168.0.1` — check the sticker on the router, or run `ipconfig` and
+   look at "Default Gateway."
+3. **Find the DHCP settings**, then look for "Address Reservation," "DHCP
+   Reservation," or "Static Lease List" (naming varies by router brand).
+4. **Add an entry** binding that MAC address to a fixed IP — pick one outside the
+   range the router hands out dynamically (e.g. `.200` or higher) to avoid future
+   conflicts.
+5. **Reconnect or reboot the Windows PC once** so it picks up the reserved
+   address, then confirm with `ipconfig` that it stuck.
+6. On the tablet, bookmark `http://<that fixed IP>:4000` (Chrome/Edge → **Add to
+   Home screen**) — it now survives router restarts and power outages with no
+   more re-checking the address.
+
+Prefer not to touch the router? A static IP set directly on the Windows PC
+(*Settings → Network & Internet → adapter → IPv4 → manual*) works too, but is
+more fragile — you have to pick an IP outside the router's DHCP pool yourself to
+avoid a conflict, whereas a router-side reservation can't collide by design.
+
+Whichever you use, `Show-Tablet-Address.bat` (in `scripts/windows/`) is a safety
+net — double-click it any time to see the address currently in use, in case
+something ever does change.
+
 ### Manual setup
 
 The app itself needs nothing Windows-specific — `npm install && npm start` works
@@ -233,8 +267,8 @@ not run it, or want to understand/customize what it's doing):
     ```
 - **Give the desktop a stable local IP.** By default a router can hand out a
   different IP after a reboot, which breaks whatever URL the tablet has bookmarked.
-  Set a DHCP reservation for the desktop's MAC address in your router's admin page
-  (or assign it a static IP), so `http://<ip>:4000` always points to the same place.
+  See [Giving the tablet a permanent address](#giving-the-tablet-a-permanent-address)
+  below.
 - **Back up `data/pos.db` on a schedule.** See [Data & backups](#data--backups) above
   for what's in it. On Windows, Task Scheduler can run a daily copy command (e.g.
   `robocopy` to an external drive or network share) without anyone remembering to do
